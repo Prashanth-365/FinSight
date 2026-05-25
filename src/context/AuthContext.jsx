@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { getCurrentUser, logout as doLogout, masterAccountExists } from '@/lib/auth.js';
+import { signOutGoogle } from '@/lib/googleAuth.js';
 import { seedIfEmpty } from '@/db/seed.js';
 
 const AuthContext = createContext(null);
@@ -25,6 +26,7 @@ export function AuthProvider({ children }) {
 
   const logout = async () => {
     await doLogout();
+    await signOutGoogle();
     setUser(null);
   };
 

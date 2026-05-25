@@ -14,6 +14,10 @@ db.version(1).stores({
   settings: 'key'
 });
 
+db.version(2).stores({
+  users: '++id, username, email, googleSub'
+});
+
 // re-number slNo across all transactions in chronological order.
 // Call after any insert/update/delete of transactions whose dateTime is non-trivial.
 export async function reindexSlNo() {

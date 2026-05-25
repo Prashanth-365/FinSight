@@ -99,11 +99,33 @@ async function authedFetch(url, opts = {}, retry = true) {
   return r;
 }
 
+async function driveError(r, label) {
+  let detail = '';
+  try {
+    const ct = r.headers.get('content-type') ?? '';
+    if (ct.includes('application/json')) {
+      const j = await r.json();
+      const err = j?.error;
+      const reason = err?.errors?.[0]?.reason;
+      detail = [err?.message, reason].filter(Boolean).join(' · ');
+    } else {
+      detail = (await r.text()).slice(0, 200);
+    }
+  } catch {}
+  const hint =
+    r.status === 403 && /accessNotConfigured|SERVICE_DISABLED/i.test(detail)
+      ? ' — Drive API is not enabled for the project that owns this OAuth Client ID. Enable it at https://console.cloud.google.com/apis/library/drive.googleapis.com'
+      : r.status === 403 && /insufficient/i.test(detail)
+      ? ' — token is missing the drive.appdata scope. Click Disconnect, hard-reload, then Connect again.'
+      : '';
+  return new Error(`${label} failed (${r.status})${detail ? ': ' + detail : ''}${hint}`);
+}
+
 export async function findBackup() {
   const q = encodeURIComponent(`name='${BACKUP_FILE}' and trashed=false`);
   const url = `${DRIVE_BASE}/files?spaces=appDataFolder&q=${q}&fields=files(id,name,modifiedTime,size)`;
   const r = await authedFetch(url);
-  if (!r.ok) throw new Error(`Drive list failed (${r.status}).`);
+  if (!r.ok) throw await driveError(r, 'Drive list');
   const j = await r.json();
   return j.files?.[0] ?? null;
 }
@@ -133,7 +155,7 @@ export async function uploadBackup(envelope) {
     headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
     body
   });
-  if (!r.ok) throw new Error(`Drive upload failed (${r.status}).`);
+  if (!r.ok) throw await driveError(r, 'Drive upload');
   return r.json();
 }
 
@@ -141,7 +163,7 @@ export async function downloadBackup() {
   const f = await findBackup();
   if (!f) return null;
   const r = await authedFetch(`${DRIVE_BASE}/files/${f.id}?alt=media`);
-  if (!r.ok) throw new Error(`Drive download failed (${r.status}).`);
+  if (!r.ok) throw await driveError(r, 'Drive download');
   const envelope = await r.json();
   return { envelope, modifiedTime: f.modifiedTime, size: f.size };
 }
@@ -150,6 +172,6 @@ export async function deleteBackup() {
   const f = await findBackup();
   if (!f) return false;
   const r = await authedFetch(`${DRIVE_BASE}/files/${f.id}`, { method: 'DELETE' });
-  if (!r.ok && r.status !== 204) throw new Error(`Drive delete failed (${r.status}).`);
+  if (!r.ok && r.status !== 204) throw await driveError(r, 'Drive delete');
   return true;
 }

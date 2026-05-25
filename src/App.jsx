@@ -29,8 +29,8 @@ export default function App() {
   }
   return (
     <Routes>
-      <Route path="/login" element={<AuthLanding mode="login" />} />
-      <Route path="/register" element={<AuthLanding mode="register" />} />
+      <Route path="/login" element={<AuthLanding />} />
+      <Route path="/register" element={<AuthLanding />} />
 
       <Route element={<ProtectedRoute><AppShell /></ProtectedRoute>}>
         <Route index element={<Home />} />

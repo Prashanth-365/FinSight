@@ -46,3 +46,55 @@ export async function logout() {
 export async function masterAccountExists() {
   return (await db.users.count()) > 0;
 }
+
+/**
+ * Sign in (or auto-register) using a verified Google credential.
+ * Returns { user, isNew }.
+ */
+export async function signInWithGoogle({ sub, email, name, picture }) {
+  if (!sub) throw new Error('Missing Google subject id.');
+
+  let user = await db.users.where({ googleSub: sub }).first();
+  let isNew = false;
+
+  if (!user) {
+    // Migrate a pre-existing local-only master account if its email matches.
+    // This avoids creating a duplicate user when an existing user first signs in with Google.
+    if (email) {
+      const byEmail = (await db.users.toArray()).find(
+        (u) => !u.googleSub && u.email?.toLowerCase() === email.toLowerCase()
+      );
+      if (byEmail) {
+        await db.users.update(byEmail.id, { googleSub: sub, name, picture });
+        user = await db.users.get(byEmail.id);
+      }
+    }
+  }
+
+  if (!user) {
+    isNew = true;
+    const id = await db.users.add({
+      googleSub: sub,
+      username: (email?.split('@')[0] ?? 'user') + '',
+      email: email ?? '',
+      name: name ?? '',
+      picture: picture ?? '',
+      createdAt: Date.now()
+    });
+    user = await db.users.get(id);
+  } else {
+    // Refresh display fields each sign-in
+    await db.users.update(user.id, { email, name, picture });
+  }
+
+  const session = {
+    id: user.id,
+    username: user.username,
+    email: user.email,
+    name,
+    picture,
+    googleSub: sub
+  };
+  await setSetting(SESSION_KEY, session);
+  return { user: session, isNew };
+}
