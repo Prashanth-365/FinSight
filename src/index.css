@@ -1,0 +1,95 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --bg: 246 248 252;
+    --surface: 255 255 255;
+    --elevated: 250 251 254;
+    --border: 226 232 240;
+    --muted: 241 245 249;
+    --muted-fg: 100 116 139;
+    --fg: 15 23 42;
+    --primary: 37 99 235;
+    --primary-fg: 255 255 255;
+    --success: 16 185 129;
+    --danger: 239 68 68;
+    --warning: 234 179 8;
+  }
+
+  .dark {
+    --bg: 11 18 32;
+    --surface: 17 25 41;
+    --elevated: 22 32 51;
+    --border: 36 49 76;
+    --muted: 25 36 58;
+    --muted-fg: 148 163 184;
+    --fg: 226 232 240;
+    --primary: 34 211 238;
+    --primary-fg: 11 18 32;
+    --success: 52 211 153;
+    --danger: 248 113 113;
+    --warning: 250 204 21;
+  }
+
+  html, body, #root { height: 100%; }
+  body {
+    @apply bg-background text-foreground antialiased font-sans;
+    -webkit-font-smoothing: antialiased;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior-y: contain;
+  }
+
+  /* nicer focus rings */
+  :focus-visible {
+    outline: 2px solid rgb(var(--primary));
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+
+  ::selection { background: rgb(var(--primary) / 0.25); }
+}
+
+@layer components {
+  .fs-card {
+    @apply bg-surface border border-border rounded-2xl shadow-card dark:shadow-card-dark;
+  }
+  .fs-input {
+    @apply w-full bg-elevated border border-border rounded-xl px-3.5 py-2.5 text-sm
+           placeholder:text-muted-fg focus:outline-none focus:ring-2 focus:ring-primary/40
+           focus:border-primary/60 transition-colors;
+  }
+  .fs-btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium
+           transition-colors disabled:opacity-50 disabled:cursor-not-allowed select-none;
+  }
+  .fs-btn-primary { @apply fs-btn bg-primary text-primary-fg hover:opacity-90; }
+  .fs-btn-secondary { @apply fs-btn bg-elevated border border-border text-foreground hover:bg-muted; }
+  .fs-btn-ghost { @apply fs-btn hover:bg-muted text-foreground; }
+  .fs-btn-danger { @apply fs-btn bg-danger text-white hover:opacity-90; }
+
+  .fs-chip {
+    @apply inline-flex items-center gap-1.5 rounded-full bg-muted text-muted-fg text-xs px-2.5 py-1;
+  }
+
+  .fs-skeleton {
+    @apply relative overflow-hidden bg-muted rounded-lg;
+  }
+  .fs-skeleton::after {
+    content: '';
+    position: absolute; inset: 0;
+    background: linear-gradient(90deg, transparent, rgb(var(--border) / 0.4), transparent);
+    animation: shimmer 1.4s infinite;
+    transform: translateX(-100%);
+  }
+
+  /* hide scrollbars on horizontal carousels */
+  .hide-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
+  .hide-scrollbar::-webkit-scrollbar { display: none; }
+}
+
+@layer utilities {
+  .safe-bottom { padding-bottom: max(env(safe-area-inset-bottom), 0.5rem); }
+  .safe-top { padding-top: max(env(safe-area-inset-top), 0.5rem); }
+}

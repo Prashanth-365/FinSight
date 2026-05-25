@@ -1,0 +1,258 @@
+import { useEffect, useState } from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
+import { Plus, Edit3, Trash2, Wallet, CreditCard, Landmark, X } from 'lucide-react';
+import { db } from '@/db/database.js';
+import { Card } from '@/components/ui/Card.jsx';
+import { Modal, ConfirmDialog } from '@/components/ui/Modal.jsx';
+import { Field } from '@/components/ui/Input.jsx';
+import { Select } from '@/components/ui/Select.jsx';
+import { useToast } from '@/components/ui/Toast.jsx';
+import { SectionHeader } from './Profiles.jsx';
+import { maskNumber, cn } from '@/lib/utils.js';
+import { formatINR } from '@/lib/currency.js';
+
+const TYPES = [
+  { value: 'bank', label: 'Bank', icon: Landmark },
+  { value: 'card', label: 'Credit / Debit Card', icon: CreditCard },
+  { value: 'wallet', label: 'Wallet / UPI', icon: Wallet }
+];
+
+const COLORS = ['#22d3ee', '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#a855f7', '#ec4899', '#64748b'];
+
+export default function Accounts() {
+  const accounts = useLiveQuery(() => db.accounts.toArray(), [], []);
+  const profiles = useLiveQuery(() => db.profiles.toArray(), [], []);
+  const [editing, setEditing] = useState(null);
+  const [adding, setAdding] = useState(false);
+  const [toDelete, setToDelete] = useState(null);
+  const { success, error } = useToast();
+
+  const del = async () => {
+    if (!toDelete) return;
+    const used = await db.transactions.where('accountId').equals(toDelete.id).count();
+    if (used > 0) {
+      error(`This account has ${used} transactions. Reassign or delete those first.`);
+      return;
+    }
+    await db.accounts.delete(toDelete.id);
+    success('Account deleted');
+    setToDelete(null);
+  };
+
+  return (
+    <div className="space-y-3 animate-fade-in">
+      <SectionHeader title="Accounts" subtitle="Banks, cards, wallets — and SMS aliases" />
+      <button className="fs-btn-primary" onClick={() => setAdding(true)}>
+        <Plus className="w-4 h-4" /> Add account
+      </button>
+
+      <ul className="space-y-2">
+        {accounts.map((a) => {
+          const Icon = TYPES.find((t) => t.value === a.type)?.icon ?? Landmark;
+          return (
+            <li key={a.id}>
+              <Card className="p-3">
+                <div className="flex items-center gap-3">
+                  <span
+                    className="w-10 h-10 rounded-xl inline-flex items-center justify-center"
+                    style={{ background: (a.color ?? '#22d3ee') + '22', color: a.color ?? '#22d3ee' }}
+                  >
+                    <Icon className="w-5 h-5" />
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium text-sm">{a.name}</p>
+                    <p className="text-xs text-muted-fg">
+                      {maskNumber(a.number)} · {formatINR(a.balance ?? 0, { hidePaise: true })}
+                    </p>
+                  </div>
+                  <span className="fs-chip text-[10px] uppercase">{a.type}</span>
+                  <button className="fs-btn-ghost" onClick={() => setEditing(a)}><Edit3 className="w-4 h-4" /></button>
+                  <button className="fs-btn-ghost text-danger" onClick={() => setToDelete(a)}><Trash2 className="w-4 h-4" /></button>
+                </div>
+                {(a.aliases ?? []).length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {a.aliases.map((al) => <span key={al} className="fs-chip">{al}</span>)}
+                  </div>
+                )}
+              </Card>
+            </li>
+          );
+        })}
+      </ul>
+
+      <AccountEditor
+        open={adding || !!editing}
+        onClose={() => { setAdding(false); setEditing(null); }}
+        editing={editing}
+        profiles={profiles}
+      />
+
+      <ConfirmDialog
+        open={!!toDelete}
+        onClose={() => setToDelete(null)}
+        onConfirm={del}
+        title="Delete account?"
+        message={`"${toDelete?.name}" will be removed.`}
+        danger
+        confirmText="Delete"
+      />
+    </div>
+  );
+}
+
+function AccountEditor({ open, onClose, editing, profiles }) {
+  const { success, error } = useToast();
+  const [form, setForm] = useState(blank());
+
+  useEffect(() => {
+    if (!open) return;
+    setForm(editing
+      ? { ...blank(), ...editing, aliases: editing.aliases ?? [], profileIds: editing.profileIds ?? [] }
+      : blank());
+  }, [open, editing]);
+
+  function blank() {
+    return {
+      name: '',
+      type: 'bank',
+      number: '',
+      balance: '',
+      color: COLORS[0],
+      isActive: 1,
+      profileIds: [],
+      aliases: [],
+      aliasDraft: ''
+    };
+  }
+
+  const toggleProfile = (id) => {
+    setForm((f) => ({
+      ...f,
+      profileIds: f.profileIds.includes(id) ? f.profileIds.filter((x) => x !== id) : [...f.profileIds, id]
+    }));
+  };
+
+  const addAlias = () => {
+    const v = form.aliasDraft.trim().toUpperCase();
+    if (!v) return;
+    if (form.aliases.includes(v)) return;
+    setForm((f) => ({ ...f, aliases: [...f.aliases, v], aliasDraft: '' }));
+  };
+
+  const save = async () => {
+    try {
+      if (!form.name.trim()) throw new Error('Name required');
+      if (form.profileIds.length === 0) throw new Error('Pick at least one profile');
+      const payload = {
+        name: form.name.trim(),
+        type: form.type,
+        number: form.number ?? '',
+        balance: Number(form.balance || 0),
+        color: form.color,
+        isActive: 1,
+        profileIds: form.profileIds.map(Number),
+        aliases: form.aliases
+      };
+      if (editing) await db.accounts.update(editing.id, payload);
+      else await db.accounts.add(payload);
+      success(editing ? 'Account updated' : 'Account added');
+      onClose?.();
+    } catch (e) {
+      error(e.message);
+    }
+  };
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={editing ? 'Edit account' : 'Add account'}
+      size="lg"
+      footer={
+        <>
+          <button className="fs-btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="fs-btn-primary" onClick={save}>Save</button>
+        </>
+      }
+    >
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Account name">
+          <input className="fs-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="HDFC Bank" />
+        </Field>
+        <Field label="Type">
+          <Select value={form.type} onChange={(v) => setForm({ ...form, type: v })}
+            options={TYPES.map((t) => ({ value: t.value, label: t.label }))} />
+        </Field>
+        <Field label="Account / card number">
+          <input className="fs-input" value={form.number} onChange={(e) => setForm({ ...form, number: e.target.value })} placeholder="50100123457890" />
+        </Field>
+        <Field label="Balance (₹)" hint="For card type, use a negative number if outstanding">
+          <input inputMode="decimal" className="fs-input" value={form.balance} onChange={(e) => setForm({ ...form, balance: e.target.value })} placeholder="0" />
+        </Field>
+      </div>
+
+      <Field label="Color">
+        <div className="flex flex-wrap gap-2">
+          {COLORS.map((c) => (
+            <button
+              key={c}
+              type="button"
+              onClick={() => setForm({ ...form, color: c })}
+              className={`w-8 h-8 rounded-full ring-2 ring-offset-2 ring-offset-background ${form.color === c ? 'ring-primary' : 'ring-transparent'}`}
+              style={{ background: c }}
+            />
+          ))}
+        </div>
+      </Field>
+
+      <Field label="Visible to profiles" hint="Master always sees everything">
+        <div className="flex flex-wrap gap-2">
+          {profiles.map((p) => {
+            const active = form.profileIds.includes(p.id);
+            return (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => toggleProfile(p.id)}
+                className={cn(
+                  'px-3 py-1.5 rounded-xl border text-xs flex items-center gap-1.5',
+                  active ? 'border-primary bg-primary/10 text-primary' : 'border-border bg-elevated'
+                )}
+              >
+                <span>{p.avatar}</span> {p.name}
+              </button>
+            );
+          })}
+        </div>
+      </Field>
+
+      <Field
+        label="SMS aliases"
+        hint="Mask formats like XX7890, 12XXXX90, 1234XX. Used to auto-match incoming SMS to this account."
+      >
+        <div className="flex gap-2">
+          <input
+            className="fs-input"
+            value={form.aliasDraft}
+            onChange={(e) => setForm({ ...form, aliasDraft: e.target.value })}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addAlias(); } }}
+            placeholder="XX7890"
+          />
+          <button type="button" className="fs-btn-secondary" onClick={addAlias}>Add</button>
+        </div>
+        {form.aliases.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {form.aliases.map((al) => (
+              <span key={al} className="fs-chip">
+                {al}
+                <button onClick={() => setForm({ ...form, aliases: form.aliases.filter((x) => x !== al) })}>
+                  <X className="w-3 h-3" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+      </Field>
+    </Modal>
+  );
+}
