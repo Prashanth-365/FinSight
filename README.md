@@ -63,9 +63,23 @@ If you enable Drive sync in **Settings → Data**, FinSight will:
 
 Walkthrough for creating the Google OAuth Client is in the app: **Settings → Data → Google Drive sync → ⓘ icon**.
 
+## Android APK (auto-built in GitHub Actions)
+
+The project includes a Capacitor wrapper for Android with a custom SMS reader plugin (read past SMS + listen for new ones, both into the same SMS Inbox UI).
+
+You don't need Android Studio on your machine — every push to `main` triggers `.github/workflows/build-apk.yml`, which builds an APK on GitHub's Linux runners.
+
+**Download the APK**
+- Action artifact (each push): GitHub repo → Actions → click the latest run → bottom of the page → `finsight-debug-apk`
+- GitHub Release (permanent URL): tag a commit `git tag v0.1.0 && git push --tags` → Releases page → download `finsight-debug.apk`
+
+**One-time secret to set in GitHub**: repo → Settings → Secrets and variables → Actions → add `VITE_GOOGLE_CLIENT_ID` with the same Client ID you use in Vercel. Without this, the APK still builds but won't have Google Sign-In wired up.
+
+**Install on phone**: enable "Install unknown apps" for whatever you'll download with (Chrome/Drive), tap the .apk → install. On first launch, the app asks for SMS permission so it can scan past bank SMS and watch for new ones.
+
 ## What's next
 
 - Auto-sync on change (currently manual push/pull)
-- Native Android SMS read permission + background parsing
 - XIRR + benchmark comparisons
 - Recurring transactions
+- iOS via Capacitor (would need a Mac for codesigning)

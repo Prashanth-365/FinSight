@@ -1,7 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { Inbox, Plus, Wand2, X } from 'lucide-react';
-import { db, reindexSlNo } from '@/db/database.js';
+import { Inbox, Plus, Wand2, X, Smartphone, Download, Radio } from 'lucide-react';
+import { db, reindexSlNo, getSetting, setSetting } from '@/db/database.js';
+import {
+  isNativeAndroid, ensureSmsPermission, checkSmsPermission, fetchSmsHistory, startSmsListener
+} from '@/lib/smsNative.js';
 import { Card } from '@/components/ui/Card.jsx';
 import { EmptyState } from '@/components/ui/Empty.jsx';
 import { Modal } from '@/components/ui/Modal.jsx';
@@ -11,6 +14,149 @@ import { Select } from '@/components/ui/Select.jsx';
 import { useToast } from '@/components/ui/Toast.jsx';
 import { aliasMatchesAccountNumber, fmtDateTime } from '@/lib/utils.js';
 import { formatINR } from '@/lib/currency.js';
+
+function NativeSmsControls() {
+  const [permission, setPermission] = useState('unknown');
+  const [busy, setBusy] = useState('');
+  const [listenerActive, setListenerActive] = useState(false);
+  const [lastSync, setLastSync] = useState(null);
+  const [stopFn, setStopFn] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      setPermission(await checkSmsPermission());
+      setLastSync(await getSetting('sms.lastImportTs', null));
+      const wantsListen = await getSetting('sms.autoListen', false);
+      if (wantsListen) await startListening();
+    })();
+    return () => { if (stopFn) stopFn(); };
+    // eslint-disable-next-line
+  }, []);
+
+  const grant = async () => {
+    setBusy('perm');
+    const ok = await ensureSmsPermission();
+    setPermission(ok ? 'granted' : 'denied');
+    setBusy('');
+  };
+
+  const importHistory = async () => {
+    setBusy('import');
+    try {
+      const ok = await ensureSmsPermission();
+      if (!ok) { setPermission('denied'); return; }
+      const sinceTs = (await getSetting('sms.lastImportTs', 0)) ?? 0;
+      const { messages } = await fetchSmsHistory({ sinceTs, limit: 5000 });
+      let added = 0;
+      const existingIds = new Set((await db.smsQueue.toArray())
+        .map((s) => s.nativeId).filter(Boolean));
+      for (const m of messages) {
+        if (existingIds.has(m.id)) continue;
+        const parsed = parseSms(m.body);
+        if (!parsed.amount) continue; // skip messages we can't even pull an amount from
+        await db.smsQueue.add({
+          rawSms: `${m.sender}: ${m.body}`,
+          parsedData: parsed,
+          status: 'pending',
+          dateTime: m.date,
+          linkedTxnId: null,
+          nativeId: m.id,
+          source: 'inbox-history'
+        });
+        added++;
+      }
+      await setSetting('sms.lastImportTs', Date.now());
+      setLastSync(Date.now());
+      alert(added > 0
+        ? `Imported ${added} new SMS into the inbox.`
+        : 'No new bank/UPI messages found since last import.');
+    } catch (e) {
+      alert('Could not read SMS: ' + e.message);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const startListening = async () => {
+    setBusy('listen');
+    const ok = await ensureSmsPermission();
+    if (!ok) { setPermission('denied'); setBusy(''); return; }
+    const stop = await startSmsListener(async (m) => {
+      const parsed = parseSms(m.body);
+      if (!parsed.amount) return;
+      await db.smsQueue.add({
+        rawSms: `${m.sender}: ${m.body}`,
+        parsedData: parsed,
+        status: 'pending',
+        dateTime: m.date,
+        linkedTxnId: null,
+        nativeId: null,
+        source: 'inbox-live'
+      });
+    });
+    setStopFn(() => stop);
+    setListenerActive(true);
+    await setSetting('sms.autoListen', true);
+    setBusy('');
+  };
+
+  const stopListening = async () => {
+    if (stopFn) await stopFn();
+    setStopFn(null);
+    setListenerActive(false);
+    await setSetting('sms.autoListen', false);
+  };
+
+  return (
+    <div className="fs-card p-3.5 animate-slide-up">
+      <div className="flex items-start gap-3">
+        <span className="inline-flex items-center justify-center w-9 h-9 rounded-xl bg-primary/15 text-primary shrink-0">
+          <Smartphone className="w-5 h-5" />
+        </span>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-medium flex items-center gap-2">
+            Auto SMS tracking
+            <span className={`fs-chip text-[10px] uppercase ${
+              permission === 'granted' ? 'text-success' : 'text-muted-fg'
+            }`}>
+              {permission === 'granted' ? 'enabled' : permission === 'denied' ? 'denied' : 'not granted'}
+            </span>
+          </p>
+          <p className="text-xs text-muted-fg">
+            We scan SMS only from likely bank/UPI senders. Your messages never leave this device.
+          </p>
+        </div>
+      </div>
+
+      {permission !== 'granted' ? (
+        <button className="fs-btn-primary w-full mt-3" onClick={grant} disabled={busy === 'perm'}>
+          {busy === 'perm' ? 'Asking…' : 'Grant SMS permission'}
+        </button>
+      ) : (
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <button className="fs-btn-secondary" onClick={importHistory} disabled={!!busy}>
+            <Download className="w-4 h-4" />
+            {busy === 'import' ? 'Reading inbox…' : 'Import past SMS'}
+          </button>
+          {!listenerActive ? (
+            <button className="fs-btn-primary" onClick={startListening} disabled={!!busy}>
+              <Radio className="w-4 h-4" /> Auto-track new SMS
+            </button>
+          ) : (
+            <button className="fs-btn-ghost text-danger" onClick={stopListening}>
+              <Radio className="w-4 h-4" /> Stop auto-track
+            </button>
+          )}
+        </div>
+      )}
+      {lastSync && (
+        <p className="text-[11px] text-muted-fg mt-2">
+          Last history import: {new Date(lastSync).toLocaleString('en-IN')}
+        </p>
+      )}
+    </div>
+  );
+}
 
 // Minimal SMS heuristic parser — works on common Indian bank/UPI SMS shapes.
 function parseSms(raw) {
@@ -43,15 +189,17 @@ export default function SmsQueue() {
 
   return (
     <div className="space-y-3 animate-fade-in">
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between gap-2 flex-wrap">
         <div>
           <h1 className="text-lg font-semibold">SMS inbox</h1>
           <p className="text-xs text-muted-fg">Review parsed SMS and convert into transactions.</p>
         </div>
-        <button className="fs-btn-primary" onClick={() => setAdding(true)}>
+        <button className="fs-btn-secondary" onClick={() => setAdding(true)}>
           <Plus className="w-4 h-4" /> Paste SMS
         </button>
       </div>
+
+      {isNativeAndroid() && <NativeSmsControls />}
 
       <Card>
         <div className="px-4 py-2 text-xs font-semibold text-muted-fg uppercase tracking-wider border-b border-border">

@@ -1,0 +1,12 @@
+{
+  "appId": "com.finsight.app",
+  "appName": "FinSight",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "android": {
+    "allowMixedContent": false
+  },
+  "server": {
+    "androidScheme": "https"
+  }
+}
