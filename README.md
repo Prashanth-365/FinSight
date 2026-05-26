@@ -23,6 +23,18 @@ npm run dev      # http://localhost:5173
 npm run build && npm run preview
 ```
 
+### Make Google Sign-In zero-setup for users (recommended)
+
+If you're the one deploying this app, set the Google OAuth Client ID once via an
+environment variable so visitors never see the "paste Client ID" screen:
+
+- **Local dev:** create `.env.local` with `VITE_GOOGLE_CLIENT_ID=123-abc.apps.googleusercontent.com`
+- **Vercel:** Project → Settings → Environment Variables → add `VITE_GOOGLE_CLIENT_ID` → redeploy
+
+The Client ID isn't a secret (Google publishes them in your auth URLs anyway), so embedding it
+in the build is safe and standard. After this, users tap **Continue with Google** → one consent
+popup grants both sign-in and Drive backup access → done. No setup. WhatsApp-style.
+
 ## Tech
 
 - React 18 + React Router v6

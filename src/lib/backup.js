@@ -1,4 +1,4 @@
-// Orchestrates: dump DB → encrypt → upload, and download → decrypt → restore.
+// Orchestrates: dump DB → (optionally encrypt) → upload, and download → (decrypt if needed) → restore.
 import { db, reindexSlNo, setSetting } from '@/db/database.js';
 import { encryptJson, decryptJson } from './crypto.js';
 import { uploadBackup, downloadBackup, findBackup } from './drive.js';
@@ -27,19 +27,43 @@ async function restoreAll(payload) {
   await reindexSlNo();
 }
 
-export async function pushBackup(passphrase) {
+/**
+ * Push a backup to Drive. Always overwrites the single backup file.
+ * Pass { encrypt: false } to upload as plain JSON (passphrase is ignored).
+ */
+export async function pushBackup(passphrase, { encrypt = true } = {}) {
   const payload = await dumpAll();
-  const envelope = await encryptJson(payload, passphrase);
+  const envelope = encrypt
+    ? await encryptJson(payload, passphrase)
+    : payload; // plain JSON; identifiable by presence of `data` key, absence of `alg`
   const meta = await uploadBackup(envelope);
   await setSetting('drive.lastSyncedAt', Date.now());
   await setSetting('drive.remoteModifiedTime', meta.modifiedTime ?? null);
+  await setSetting('drive.lastEncrypted', encrypt);
   return meta;
 }
 
+/**
+ * Pull a backup from Drive and restore. Auto-detects encrypted vs plain.
+ * Passphrase only required if the file is encrypted.
+ */
 export async function pullBackup(passphrase) {
   const got = await downloadBackup();
   if (!got) throw new Error('No backup found in Google Drive yet.');
-  const payload = await decryptJson(got.envelope, passphrase);
+  const env = got.envelope;
+
+  let payload;
+  if (env?.alg && env?.ct) {
+    // encrypted envelope
+    if (!passphrase) throw new Error('This backup is encrypted. Enter the passphrase to restore.');
+    payload = await decryptJson(env, passphrase);
+  } else if (env?.data) {
+    // plaintext payload
+    payload = env;
+  } else {
+    throw new Error('Backup file is in an unknown format.');
+  }
+
   await restoreAll(payload);
   await setSetting('drive.lastSyncedAt', Date.now());
   await setSetting('drive.remoteModifiedTime', got.modifiedTime ?? null);

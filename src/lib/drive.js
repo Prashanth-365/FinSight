@@ -1,100 +1,34 @@
-// Google Drive sync via Google Identity Services (token-client / FedCM where supported).
-// Scope is locked to "drive.appdata" — a hidden per-app folder no other app can read.
-// Access token lives in memory only; it is NOT persisted. Re-auth is silent when possible.
+// Drive sync against the user's hidden appDataFolder. Reuses the access token from
+// googleAuth.js — the token is granted at sign-in alongside drive.appdata scope, so
+// there's no separate "Connect Drive" step for the user.
+
+import { getAccessToken, silentReauth, isSignedIn } from './googleAuth.js';
 
 const BACKUP_FILE = 'finsight-backup.json.enc';
 const DRIVE_BASE = 'https://www.googleapis.com/drive/v3';
 const UPLOAD_BASE = 'https://www.googleapis.com/upload/drive/v3';
-const SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
-const GIS_SRC = 'https://accounts.google.com/gsi/client';
-
-let _gisReady = null;
-let _tokenClient = null;
-let _tokenInfo = null; // { access_token, expires_at }
-let _clientId = null;
-
-function loadGisOnce() {
-  if (_gisReady) return _gisReady;
-  _gisReady = new Promise((resolve, reject) => {
-    if (window.google?.accounts?.oauth2) return resolve();
-    const s = document.createElement('script');
-    s.src = GIS_SRC;
-    s.async = true;
-    s.defer = true;
-    s.onload = () => resolve();
-    s.onerror = () => reject(new Error('Failed to load Google Identity Services.'));
-    document.head.appendChild(s);
-  });
-  return _gisReady;
-}
-
-function ensureTokenClient(clientId) {
-  if (_tokenClient && _clientId === clientId) return _tokenClient;
-  _clientId = clientId;
-  _tokenClient = window.google.accounts.oauth2.initTokenClient({
-    client_id: clientId,
-    scope: SCOPE,
-    callback: () => {} // replaced per-request
-  });
-  return _tokenClient;
-}
 
 export function isConnected() {
-  return !!(_tokenInfo?.access_token && _tokenInfo.expires_at > Date.now() + 5000);
-}
-
-/**
- * Request an access token. `prompt`:
- *   ''         → silent if Google can; popup if needed
- *   'consent'  → always show consent (first time)
- */
-export async function connect(clientId, prompt = '') {
-  if (!clientId) throw new Error('Google OAuth Client ID is required.');
-  await loadGisOnce();
-  const tc = ensureTokenClient(clientId);
-  return new Promise((resolve, reject) => {
-    tc.callback = (resp) => {
-      if (resp.error) {
-        reject(new Error(resp.error_description || resp.error));
-        return;
-      }
-      _tokenInfo = {
-        access_token: resp.access_token,
-        expires_at: Date.now() + Number(resp.expires_in ?? 3600) * 1000
-      };
-      resolve(_tokenInfo);
-    };
-    try {
-      tc.requestAccessToken({ prompt });
-    } catch (e) {
-      reject(e);
-    }
-  });
-}
-
-export function disconnect() {
-  if (_tokenInfo?.access_token && window.google?.accounts?.oauth2) {
-    try { window.google.accounts.oauth2.revoke(_tokenInfo.access_token, () => {}); } catch {}
-  }
-  _tokenInfo = null;
+  return isSignedIn();
 }
 
 async function authedFetch(url, opts = {}, retry = true) {
-  if (!isConnected()) {
-    if (!_clientId) throw new Error('Not connected to Google Drive.');
-    await connect(_clientId, ''); // silent re-auth
+  let token = getAccessToken();
+  if (!token) {
+    const ok = await silentReauth();
+    if (!ok) throw new Error('Your Google session expired. Please sign in again.');
+    token = getAccessToken();
   }
   const r = await fetch(url, {
     ...opts,
     headers: {
       ...(opts.headers ?? {}),
-      Authorization: `Bearer ${_tokenInfo.access_token}`
+      Authorization: `Bearer ${token}`
     }
   });
   if (r.status === 401 && retry) {
-    _tokenInfo = null;
-    await connect(_clientId, '');
-    return authedFetch(url, opts, false);
+    const ok = await silentReauth();
+    if (ok) return authedFetch(url, opts, false);
   }
   return r;
 }
@@ -116,7 +50,7 @@ async function driveError(r, label) {
     r.status === 403 && /accessNotConfigured|SERVICE_DISABLED/i.test(detail)
       ? ' — Drive API is not enabled for the project that owns this OAuth Client ID. Enable it at https://console.cloud.google.com/apis/library/drive.googleapis.com'
       : r.status === 403 && /insufficient/i.test(detail)
-      ? ' — token is missing the drive.appdata scope. Click Disconnect, hard-reload, then Connect again.'
+      ? ' — token is missing the drive.appdata scope. Sign out, hard-reload, then sign in again.'
       : '';
   return new Error(`${label} failed (${r.status})${detail ? ': ' + detail : ''}${hint}`);
 }

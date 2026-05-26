@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Download, Upload, Cloud, CloudOff, Trash2, ShieldCheck, RefreshCw, KeyRound, Info, Eye, EyeOff } from 'lucide-react';
+import { Download, Upload, Cloud, CloudOff, Trash2, ShieldCheck, ShieldAlert, RefreshCw, Eye, EyeOff, LogIn } from 'lucide-react';
 import { db, reindexSlNo, getSetting, setSetting } from '@/db/database.js';
 import { Card } from '@/components/ui/Card.jsx';
 import { Field } from '@/components/ui/Input.jsx';
@@ -7,7 +7,7 @@ import { Modal, ConfirmDialog } from '@/components/ui/Modal.jsx';
 import { useToast } from '@/components/ui/Toast.jsx';
 import { SectionHeader } from './Profiles.jsx';
 import { passphraseScore } from '@/lib/crypto.js';
-import { connect, disconnect, isConnected } from '@/lib/drive.js';
+import { isSignedIn, signInWithGoogle, getEffectiveClientId } from '@/lib/googleAuth.js';
 import { pushBackup, pullBackup, remoteStatus } from '@/lib/backup.js';
 import { fmtDateTime, cn } from '@/lib/utils.js';
 
@@ -73,7 +73,7 @@ export default function Data() {
 
   return (
     <div className="space-y-3 animate-fade-in">
-      <SectionHeader title="Data" subtitle="Backup, restore, encrypted Google Drive sync" />
+      <SectionHeader title="Data" subtitle="Encrypted Drive backup, export, import, wipe" />
 
       <DriveCard />
 
@@ -135,25 +135,38 @@ function Row({ title, desc, icon: Icon, action }) {
 
 function DriveCard() {
   const { success, error, info } = useToast();
-  const [clientId, setClientId] = useState('');
-  const [passphrase, setPassphrase] = useState(''); // kept only in memory
+  const [passphrase, setPassphrase] = useState('');
   const [showPass, setShowPass] = useState(false);
   const [connected, setConnected] = useState(false);
   const [busy, setBusy] = useState('');
-  const [status, setStatus] = useState({ lastSyncedAt: null, remoteModifiedTime: null, exists: null });
-  const [setupOpen, setSetupOpen] = useState(false);
+  const [status, setStatus] = useState({ lastSyncedAt: null, remoteModifiedTime: null, exists: null, lastEncrypted: null });
   const [confirmPull, setConfirmPull] = useState(false);
-  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const [encrypt, setEncrypt] = useState(true);
+  const [confirmTurnOff, setConfirmTurnOff] = useState(false);
 
   useEffect(() => {
+    setConnected(isSignedIn());
     (async () => {
-      setClientId((await getSetting('drive.clientId', '')) ?? '');
+      const enc = await getSetting('drive.encrypt', true);
+      setEncrypt(enc !== false);
       setStatus({
         lastSyncedAt: await getSetting('drive.lastSyncedAt', null),
-        remoteModifiedTime: await getSetting('drive.remoteModifiedTime', null)
+        remoteModifiedTime: await getSetting('drive.remoteModifiedTime', null),
+        lastEncrypted: await getSetting('drive.lastEncrypted', null)
       });
     })();
   }, []);
+
+  const toggleEncrypt = async (nextOn) => {
+    if (!nextOn) { setConfirmTurnOff(true); return; }
+    setEncrypt(true);
+    await setSetting('drive.encrypt', true);
+  };
+  const reallyTurnOff = async () => {
+    setEncrypt(false);
+    await setSetting('drive.encrypt', false);
+    setConfirmTurnOff(false);
+  };
 
   const refreshStatus = async () => {
     try {
@@ -163,18 +176,19 @@ function DriveCard() {
         exists: r?.exists ?? false,
         remoteModifiedTime: r?.modifiedTime ?? s.remoteModifiedTime
       }));
-    } catch {}
+    } catch (e) {
+      error(e.message);
+    }
   };
 
-  const handleConnect = async (mode = 'consent') => {
+  const handleReconnect = async () => {
     try {
-      if (!clientId.trim()) throw new Error('Paste your Google OAuth Client ID first.');
-      setBusy('connect');
-      await setSetting('drive.clientId', clientId.trim());
-      await connect(clientId.trim(), mode);
+      setBusy('reconnect');
+      const cid = await getEffectiveClientId();
+      if (!cid) throw new Error('No Google Client ID configured.');
+      await signInWithGoogle(cid);
       setConnected(true);
-      success('Connected to Google Drive');
-      await refreshStatus();
+      success('Drive access restored');
     } catch (e) {
       error(e.message);
     } finally {
@@ -182,22 +196,29 @@ function DriveCard() {
     }
   };
 
-  const handleDisconnect = async () => {
-    disconnect();
-    setConnected(false);
-    setPassphrase('');
-    info('Disconnected from Google Drive');
+  const ensureConnected = async () => {
+    if (isSignedIn()) return true;
+    const cid = await getEffectiveClientId();
+    if (!cid) {
+      error('Google Sign-In is not set up. Sign out and use the Google button on the login screen.');
+      return false;
+    }
+    await signInWithGoogle(cid);
+    setConnected(isSignedIn());
+    return isSignedIn();
   };
 
   const handlePush = async () => {
     try {
-      if (!connected && !isConnected()) await handleConnect('');
-      if (!passphrase) throw new Error('Enter your encryption passphrase.');
-      if (passphraseScore(passphrase) < 2) throw new Error('Passphrase is too weak. Use 8+ chars with mixed case / digits.');
+      if (encrypt) {
+        if (!passphrase) throw new Error('Enter your encryption passphrase.');
+        if (passphraseScore(passphrase) < 2) throw new Error('Passphrase is too weak. Use 8+ chars with mixed case / digits.');
+      }
+      if (!(await ensureConnected())) return;
       setBusy('push');
-      const meta = await pushBackup(passphrase);
-      setStatus({ lastSyncedAt: Date.now(), remoteModifiedTime: meta.modifiedTime ?? null, exists: true });
-      success('Encrypted backup uploaded');
+      const meta = await pushBackup(passphrase, { encrypt });
+      setStatus((s) => ({ ...s, lastSyncedAt: Date.now(), remoteModifiedTime: meta.modifiedTime ?? null, exists: true, lastEncrypted: encrypt }));
+      success(encrypt ? 'Encrypted backup uploaded' : 'Backup uploaded (plain text)');
     } catch (e) {
       error(e.message);
     } finally {
@@ -207,9 +228,9 @@ function DriveCard() {
 
   const handlePull = async () => {
     try {
-      if (!connected && !isConnected()) await handleConnect('');
-      if (!passphrase) throw new Error('Enter your encryption passphrase.');
+      if (!(await ensureConnected())) return;
       setBusy('pull');
+      // Pull tries with whatever passphrase is in the field — empty is fine for plain-text backups.
       await pullBackup(passphrase);
       success('Restored from Google Drive — reloading…');
       setTimeout(() => location.reload(), 1000);
@@ -221,42 +242,62 @@ function DriveCard() {
     }
   };
 
-  const connectedNow = connected || isConnected();
   const score = passphraseScore(passphrase);
 
   return (
     <Card className="p-4 space-y-3">
       <div className="flex items-start gap-3">
         <span className="inline-flex items-center justify-center w-10 h-10 rounded-xl bg-primary/15 text-primary shrink-0">
-          {connectedNow ? <Cloud className="w-5 h-5" /> : <CloudOff className="w-5 h-5" />}
+          {connected ? <Cloud className="w-5 h-5" /> : <CloudOff className="w-5 h-5" />}
         </span>
         <div className="flex-1 min-w-0">
           <p className="text-sm font-medium flex items-center gap-2">
             Google Drive sync
-            <span className={cn('fs-chip text-[10px] uppercase', connectedNow ? 'text-success' : 'text-muted-fg')}>
-              {connectedNow ? 'connected' : 'not connected'}
+            <span className={cn('fs-chip text-[10px] uppercase', connected ? 'text-success' : 'text-muted-fg')}>
+              {connected ? 'connected' : 'session expired'}
             </span>
           </p>
           <p className="text-xs text-muted-fg leading-snug">
-            End-to-end encrypted backup to a hidden app folder on your Google Drive. No one else — not even Google's general search — can read it.
+            End-to-end encrypted backup. We talk to a hidden app-private folder on your own Drive —
+            not visible in Drive UI, no other app can read it.
           </p>
         </div>
-        <button className="fs-btn-ghost text-xs" onClick={() => setSetupOpen(true)} title="How to set up">
-          <Info className="w-4 h-4" />
+      </div>
+
+      {/* Encryption toggle */}
+      <div className="flex items-start gap-3 rounded-xl bg-elevated border border-border p-3">
+        <span className={cn(
+          'inline-flex items-center justify-center w-9 h-9 rounded-lg shrink-0',
+          encrypt ? 'bg-success/15 text-success' : 'bg-warning/15 text-warning'
+        )}>
+          {encrypt ? <ShieldCheck className="w-4 h-4" /> : <ShieldAlert className="w-4 h-4" />}
+        </span>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-medium">Encrypt backup with a passphrase</p>
+          <p className="text-xs text-muted-fg leading-snug">
+            {encrypt
+              ? 'Recommended. Even Google can\'t read the file without your passphrase.'
+              : 'Off — the backup will upload as plain JSON. Only your Google account password protects it.'}
+          </p>
+        </div>
+        <button
+          role="switch"
+          aria-checked={encrypt}
+          onClick={() => toggleEncrypt(!encrypt)}
+          className={cn(
+            'shrink-0 w-11 h-6 rounded-full relative transition-colors',
+            encrypt ? 'bg-success' : 'bg-muted'
+          )}
+        >
+          <span className={cn(
+            'absolute top-0.5 w-5 h-5 bg-white rounded-full transition-all',
+            encrypt ? 'left-[22px]' : 'left-0.5'
+          )} />
         </button>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-2">
-        <Field label="Google OAuth Client ID" hint="One-time setup. See the ⓘ icon above.">
-          <input
-            className="fs-input font-mono text-xs"
-            placeholder="123456-abc.apps.googleusercontent.com"
-            value={clientId}
-            onChange={(e) => setClientId(e.target.value)}
-            spellCheck={false}
-          />
-        </Field>
-        <Field label="Encryption passphrase" hint="Used only in this browser session. Never uploaded. Lose it = backup unreadable.">
+      {encrypt && (
+        <Field label="Encryption passphrase" hint="Used only in this browser session. Never uploaded. Lose it = backup is unreadable.">
           <div className="relative">
             <input
               className="fs-input pr-10"
@@ -277,57 +318,55 @@ function DriveCard() {
           </div>
           <PasswordStrength score={score} />
         </Field>
-      </div>
+      )}
 
       <div className="flex flex-wrap gap-2">
-        {!connectedNow ? (
-          <button className="fs-btn-primary" onClick={() => handleConnect('')} disabled={busy === 'connect'}>
-            <KeyRound className="w-4 h-4" /> {busy === 'connect' ? 'Connecting…' : 'Connect to Google Drive'}
+        {!connected && (
+          <button className="fs-btn-secondary" onClick={handleReconnect} disabled={busy === 'reconnect'}>
+            <LogIn className="w-4 h-4" /> {busy === 'reconnect' ? 'Reconnecting…' : 'Reconnect to Google'}
           </button>
-        ) : (
-          <>
-            <button className="fs-btn-primary" onClick={handlePush} disabled={!!busy}>
-              <Cloud className="w-4 h-4" /> {busy === 'push' ? 'Encrypting & uploading…' : 'Back up now'}
-            </button>
-            <button className="fs-btn-secondary" onClick={() => setConfirmPull(true)} disabled={!!busy}>
-              <RefreshCw className={cn('w-4 h-4', busy === 'pull' && 'animate-spin')} /> Restore from Drive
-            </button>
-            <button className="fs-btn-ghost" onClick={refreshStatus}>Check status</button>
-            <button className="fs-btn-ghost text-danger ml-auto" onClick={() => setConfirmDisconnect(true)}>
-              Disconnect
-            </button>
-          </>
         )}
+        <button className="fs-btn-primary" onClick={handlePush} disabled={!!busy}>
+          <Cloud className="w-4 h-4" /> {busy === 'push' ? 'Encrypting & uploading…' : 'Back up now'}
+        </button>
+        <button className="fs-btn-secondary" onClick={() => setConfirmPull(true)} disabled={!!busy}>
+          <RefreshCw className={cn('w-4 h-4', busy === 'pull' && 'animate-spin')} /> Restore from Drive
+        </button>
+        <button className="fs-btn-ghost" onClick={refreshStatus}>Check status</button>
       </div>
 
       <div className="text-xs text-muted-fg space-y-0.5 border-t border-border pt-3">
         <div className="flex items-center gap-1.5">
-          <ShieldCheck className="w-3.5 h-3.5 text-success" />
-          AES-256-GCM · PBKDF2-SHA256 (200k iter) · scope <code>drive.appdata</code> only
+          {encrypt
+            ? <><ShieldCheck className="w-3.5 h-3.5 text-success" /> AES-256-GCM · PBKDF2-SHA256 (200k iter) · scope <code>drive.appdata</code> only</>
+            : <><ShieldAlert className="w-3.5 h-3.5 text-warning" /> Plain JSON · protected only by your Google account login</>
+          }
         </div>
         {status.lastSyncedAt && <div>Last sync from this device: {fmtDateTime(status.lastSyncedAt)}</div>}
         {status.remoteModifiedTime && <div>Drive backup last modified: {fmtDateTime(new Date(status.remoteModifiedTime).getTime())}</div>}
+        {status.lastEncrypted === true && <div>Drive backup is currently <span className="text-success">encrypted</span>.</div>}
+        {status.lastEncrypted === false && <div>Drive backup is currently <span className="text-warning">plain text</span>.</div>}
         {status.exists === false && <div>No backup file in Drive yet — click "Back up now" to create one.</div>}
       </div>
-
-      <SetupModal open={setupOpen} onClose={() => setSetupOpen(false)} />
 
       <ConfirmDialog
         open={confirmPull}
         onClose={() => setConfirmPull(false)}
         onConfirm={handlePull}
         title="Restore from Drive?"
-        message="This will REPLACE all data currently on this device with the encrypted backup from Google Drive. Make sure you have entered the correct passphrase."
+        message="This will REPLACE all data currently on this device with the backup from Google Drive."
         danger
         confirmText="Replace local data"
       />
+
       <ConfirmDialog
-        open={confirmDisconnect}
-        onClose={() => setConfirmDisconnect(false)}
-        onConfirm={handleDisconnect}
-        title="Disconnect Google Drive?"
-        message="The access token is revoked and forgotten. Your Drive backup is not deleted — you can reconnect any time."
-        confirmText="Disconnect"
+        open={confirmTurnOff}
+        onClose={() => setConfirmTurnOff(false)}
+        onConfirm={reallyTurnOff}
+        title="Turn off encryption?"
+        message="Your next backup will be uploaded as plain JSON. Anyone who can access your Google Drive (including if your Google account is ever compromised) will be able to read your transactions, balances, and account names. This setting only affects the NEXT backup — your current Drive file is unchanged until then."
+        danger
+        confirmText="Turn off encryption"
       />
     </Card>
   );
@@ -345,76 +384,5 @@ function PasswordStrength({ score }) {
       </div>
       {score > 0 && <p className="text-[11px] text-muted-fg mt-1">{labels[score]}</p>}
     </div>
-  );
-}
-
-function SetupModal({ open, onClose }) {
-  return (
-    <Modal
-      open={open}
-      onClose={onClose}
-      title="One-time Google Drive setup"
-      size="lg"
-      footer={<button className="fs-btn-primary" onClick={onClose}>Got it</button>}
-    >
-      <div className="text-sm space-y-3 leading-relaxed">
-        <p className="text-muted-fg">
-          FinSight talks to <em>your own</em> Google Cloud project — that means the consent screen
-          is yours, no third-party app is ever approved, and your Drive backup uses Google's
-          own infrastructure.
-        </p>
-
-        <ol className="list-decimal pl-5 space-y-2.5">
-          <li>
-            Open the{' '}
-            <a className="text-primary underline" target="_blank" rel="noopener" href="https://console.cloud.google.com/projectcreate">
-              Google Cloud Console
-            </a>{' '}
-            and create a new project (name it anything, e.g. <code>finsight</code>).
-          </li>
-          <li>
-            Enable the{' '}
-            <a className="text-primary underline" target="_blank" rel="noopener" href="https://console.cloud.google.com/apis/library/drive.googleapis.com">
-              Google Drive API
-            </a>{' '}
-            for that project.
-          </li>
-          <li>
-            Open <strong>APIs &amp; Services → OAuth consent screen</strong>. Pick <em>External</em>,
-            fill in just the app name (e.g. FinSight) and your email. On the <em>Scopes</em>{' '}
-            step, leave it empty — we use a non-sensitive scope so no review is needed.{' '}
-            On <em>Test users</em>, add your own Google account.
-          </li>
-          <li>
-            Open <strong>APIs &amp; Services → Credentials → Create credentials → OAuth client ID →
-            Web application</strong>. Under <em>Authorised JavaScript origins</em>, add the exact
-            URL where this app runs — e.g. <code>https://finsight-you.vercel.app</code>{' '}
-            (also <code>http://localhost:5173</code> if you run it locally).
-          </li>
-          <li>
-            Copy the <strong>Client ID</strong> (looks like <code>123-abc.apps.googleusercontent.com</code>)
-            and paste it into the field above. Click <em>Connect</em>.
-          </li>
-        </ol>
-
-        <div className="rounded-xl bg-elevated border border-border p-3 text-xs space-y-1.5">
-          <p className="font-semibold flex items-center gap-1.5"><ShieldCheck className="w-3.5 h-3.5 text-success" /> What we ask Google for</p>
-          <p>
-            One scope: <code>drive.appdata</code>. That gives access <em>only</em> to a hidden
-            folder created by FinSight — not the rest of your Drive. You can revoke access any time at{' '}
-            <a className="text-primary underline" target="_blank" rel="noopener" href="https://myaccount.google.com/connections">myaccount.google.com/connections</a>.
-          </p>
-        </div>
-
-        <div className="rounded-xl bg-warning/10 border border-warning/30 p-3 text-xs">
-          <p className="font-semibold mb-1">About the passphrase</p>
-          <p>
-            We encrypt the backup before uploading. Your passphrase is the only key — it is never
-            sent anywhere. <strong>If you forget it, the backup cannot be recovered.</strong>{' '}
-            Write it down somewhere safe.
-          </p>
-        </div>
-      </div>
-    </Modal>
   );
 }

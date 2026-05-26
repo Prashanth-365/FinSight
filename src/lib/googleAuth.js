@@ -1,19 +1,40 @@
-// Google Sign-In via Google Identity Services (ID token / "Sign in with Google" button).
-// Reuses the same OAuth Client ID configured for Drive sync — no extra console setup.
-// We do NOT validate the JWT signature locally; for a client-only PWA where the `sub`
-// is used as a local identifier (not as authorization to a server), this is acceptable.
-// We do validate iss / aud / exp claims.
+// Unified Google auth: one consent popup grants BOTH sign-in identity (sub/email/name)
+// AND drive.appdata scope for encrypted backups. After consent we hold an access token
+// in memory; user info is fetched once via /oauth2/v3/userinfo.
+//
+// Client ID resolution order:
+//   1. Build-time env var  VITE_GOOGLE_CLIENT_ID  (set in Vercel for "WhatsApp-style" flow)
+//   2. Stored setting      drive.clientId         (per-device fallback)
+//   3. None                                       (show setup UI)
+
+import { getSetting } from '@/db/database.js';
 
 const GIS_SRC = 'https://accounts.google.com/gsi/client';
+const SCOPES =
+  'openid email profile https://www.googleapis.com/auth/drive.appdata';
+
+const ENV_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID ?? '';
 
 let _gisReady = null;
+let _tokenClient = null;
 let _currentClientId = null;
-let _callback = null;
+let _accessToken = null;
+let _expiresAt = 0;
+let _userInfo = null;
+
+export function envHasClientId() {
+  return !!ENV_CLIENT_ID;
+}
+
+export async function getEffectiveClientId() {
+  if (ENV_CLIENT_ID) return ENV_CLIENT_ID;
+  return ((await getSetting('drive.clientId', '')) ?? '').trim();
+}
 
 function loadGis() {
   if (_gisReady) return _gisReady;
   _gisReady = new Promise((resolve, reject) => {
-    if (window.google?.accounts?.id) return resolve();
+    if (window.google?.accounts?.oauth2) return resolve();
     const s = document.createElement('script');
     s.src = GIS_SRC;
     s.async = true;
@@ -25,104 +46,103 @@ function loadGis() {
   return _gisReady;
 }
 
-function decodeJwt(token) {
-  const seg = token.split('.')[1];
-  const b64 = seg.replace(/-/g, '+').replace(/_/g, '/');
-  const json = atob(b64.padEnd(Math.ceil(b64.length / 4) * 4, '='));
-  return JSON.parse(json);
+async function ensureTokenClient(clientId) {
+  await loadGis();
+  if (_tokenClient && _currentClientId === clientId) return _tokenClient;
+  _currentClientId = clientId;
+  _tokenClient = window.google.accounts.oauth2.initTokenClient({
+    client_id: clientId,
+    scope: SCOPES,
+    callback: () => {} // replaced per request
+  });
+  return _tokenClient;
 }
 
-function validateClaims(claims, clientId) {
-  const iss = claims.iss;
-  if (iss !== 'https://accounts.google.com' && iss !== 'accounts.google.com') {
-    throw new Error('Google sign-in: bad issuer.');
-  }
-  if (claims.aud !== clientId) {
-    throw new Error('Google sign-in: token audience does not match this Client ID.');
-  }
-  if (Number(claims.exp) * 1000 < Date.now()) {
-    throw new Error('Google sign-in: token expired. Please try again.');
-  }
-  return claims;
+function isTokenValid() {
+  return !!_accessToken && _expiresAt > Date.now() + 5000;
+}
+
+export function getAccessToken() {
+  return isTokenValid() ? _accessToken : null;
+}
+
+export function getUserInfo() {
+  return _userInfo;
+}
+
+export function isSignedIn() {
+  return isTokenValid();
 }
 
 /**
- * Initialise the GIS client and render the official "Sign in with Google" button
- * into the given DOM element. Calls `onCredential({ sub, email, name, picture })` on success.
+ * Request a fresh token. `prompt`:
+ *   ''         → silent if Google can; popup if needed
+ *   'consent'  → always show consent (first time or re-consent)
  */
-export async function renderSignInButton(element, clientId, onCredential, onError) {
-  if (!element) return;
-  if (!clientId) throw new Error('Google OAuth Client ID required.');
-  await loadGis();
-
-  _callback = (resp) => {
+async function requestToken(clientId, prompt = '') {
+  const tc = await ensureTokenClient(clientId);
+  return new Promise((resolve, reject) => {
+    tc.callback = (resp) => {
+      if (resp.error) {
+        reject(new Error(resp.error_description || resp.error));
+        return;
+      }
+      _accessToken = resp.access_token;
+      _expiresAt = Date.now() + Number(resp.expires_in ?? 3600) * 1000;
+      resolve(resp);
+    };
     try {
-      if (!resp?.credential) throw new Error('Google did not return a credential.');
-      const claims = validateClaims(decodeJwt(resp.credential), clientId);
-      onCredential?.({
-        sub: claims.sub,
-        email: claims.email,
-        name: claims.name,
-        picture: claims.picture,
-        givenName: claims.given_name,
-        emailVerified: !!claims.email_verified
-      });
+      tc.requestAccessToken({ prompt });
     } catch (e) {
-      onError?.(e);
+      reject(e);
     }
-  };
-
-  // (Re-)initialise only when client id changes
-  if (_currentClientId !== clientId) {
-    _currentClientId = clientId;
-    window.google.accounts.id.initialize({
-      client_id: clientId,
-      callback: (r) => _callback?.(r),
-      auto_select: false,
-      cancel_on_tap_outside: true,
-      ux_mode: 'popup',
-      use_fedcm_for_prompt: true
-    });
-  }
-
-  element.innerHTML = '';
-  const dark = document.documentElement.classList.contains('dark');
-  window.google.accounts.id.renderButton(element, {
-    type: 'standard',
-    theme: dark ? 'filled_black' : 'outline',
-    size: 'large',
-    text: 'continue_with',
-    shape: 'pill',
-    logo_alignment: 'left',
-    width: element.offsetWidth || 320
   });
 }
 
-/** Programmatic prompt (One Tap). Optional — the rendered button is enough. */
-export async function promptOneTap(clientId, onCredential, onError) {
-  if (!clientId) return;
-  await loadGis();
-  if (_currentClientId !== clientId) {
-    _currentClientId = clientId;
-    window.google.accounts.id.initialize({
-      client_id: clientId,
-      callback: (r) => {
-        try {
-          const claims = validateClaims(decodeJwt(r.credential), clientId);
-          onCredential?.(claims);
-        } catch (e) {
-          onError?.(e);
-        }
-      },
-      auto_select: false,
-      use_fedcm_for_prompt: true
-    });
-  }
-  window.google.accounts.id.prompt();
+async function fetchUserInfo() {
+  if (!_accessToken) throw new Error('No access token.');
+  const r = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+    headers: { Authorization: `Bearer ${_accessToken}` }
+  });
+  if (!r.ok) throw new Error('Could not fetch your Google profile (' + r.status + ').');
+  const j = await r.json();
+  _userInfo = {
+    sub: j.sub,
+    email: j.email,
+    name: j.name,
+    picture: j.picture,
+    givenName: j.given_name,
+    emailVerified: !!j.email_verified
+  };
+  return _userInfo;
 }
 
-export async function signOutGoogle() {
-  if (window.google?.accounts?.id) {
-    try { window.google.accounts.id.disableAutoSelect(); } catch {}
+/**
+ * Public: trigger the unified sign-in flow.
+ * Returns user info { sub, email, name, picture, ... }.
+ */
+export async function signInWithGoogle(clientId) {
+  if (!clientId) throw new Error('Google Client ID is not configured.');
+  await requestToken(clientId, ''); // Google chooses popup vs silent
+  return fetchUserInfo();
+}
+
+/** Try to refresh the access token silently (no UI). Returns true on success. */
+export async function silentReauth() {
+  if (!_currentClientId) return false;
+  try {
+    await requestToken(_currentClientId, '');
+    return isTokenValid();
+  } catch {
+    return false;
   }
+}
+
+export function signOutGoogle() {
+  if (_accessToken && window.google?.accounts?.oauth2) {
+    try { window.google.accounts.oauth2.revoke(_accessToken, () => {}); } catch {}
+  }
+  _accessToken = null;
+  _expiresAt = 0;
+  _userInfo = null;
 }
