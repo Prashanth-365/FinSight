@@ -16,7 +16,6 @@ import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
 import com.getcapacitor.annotation.Permission
-import com.getcapacitor.annotation.PermissionCallback
 
 @CapacitorPlugin(
     name = "SmsReader",
@@ -34,24 +33,9 @@ class SmsReaderPlugin : Plugin() {
 
     private var receiver: BroadcastReceiver? = null
 
-    @PluginMethod
-    fun checkPermissions(call: PluginCall) {
-        val ret = JSObject()
-        ret.put("sms", getPermissionState("sms").toString())
-        call.resolve(ret)
-    }
-
-    @PluginMethod
-    fun requestPermissions(call: PluginCall) {
-        requestPermissionForAlias("sms", call, "smsPermissionCallback")
-    }
-
-    @PermissionCallback
-    private fun smsPermissionCallback(call: PluginCall) {
-        val ret = JSObject()
-        ret.put("sms", getPermissionState("sms").toString())
-        call.resolve(ret)
-    }
+    // checkPermissions() and requestPermissions() are auto-provided by the base
+    // Plugin class because we declared the "sms" alias via @Permission above.
+    // No need to override them — doing so was the cause of the Kotlin compile error.
 
     /**
      * Read the existing SMS inbox. Options:
