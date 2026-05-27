@@ -11,11 +11,9 @@ import {
 import { Card } from '@/components/ui/Card.jsx';
 import { EmptyState } from '@/components/ui/Empty.jsx';
 import { Modal } from '@/components/ui/Modal.jsx';
-import { Field } from '@/components/ui/Input.jsx';
-import { Combobox } from '@/components/ui/Combobox.jsx';
-import { Select } from '@/components/ui/Select.jsx';
 import { useToast } from '@/components/ui/Toast.jsx';
-import { aliasMatchesAccountNumber, fmtDateTime, cn } from '@/lib/utils.js';
+import { TransactionSheet } from '@/components/transaction/TransactionSheet.jsx';
+import { aliasMatchesAccountNumber, fmtDateTime, todayLocalISO, cn } from '@/lib/utils.js';
 import { formatINR } from '@/lib/currency.js';
 
 /* ───────── Native SMS controls ───────── */
@@ -84,7 +82,7 @@ function NativeSmsControls() {
         }
         if (existingNativeIds.has(m.id)) continue;
         const parsed = parseSms(m.body);
-        if (!parsed.amount) continue;
+        if (!parsed.amount || !parsed.txnType) continue; // drop spam / non-txn
         toInsert.push({
           rawSms: `${m.sender}: ${m.body}`,
           parsedData: parsed,
@@ -128,7 +126,7 @@ function NativeSmsControls() {
     if (!ok) { setPermission('denied'); setBusy(''); return; }
     const stop = await startSmsListener(async (m) => {
       const parsed = parseSms(m.body);
-      if (!parsed.amount) return;
+      if (!parsed.amount || !parsed.txnType) return;
       await db.smsQueue.add({
         rawSms: `${m.sender}: ${m.body}`,
         parsedData: parsed,
@@ -283,20 +281,106 @@ function Row({ label, value, total }) {
 
 /* ───────── SMS parser ───────── */
 
+const SPAM_RE = new RegExp(
+  '(congratulations|pre-?approved|click here|apply now|hurry|offer ends|' +
+  'limited offer|limited time|voucher|coupon|t&c|terms and conditions|' +
+  'terms apply|know more|lifetime free|reward points|sign up|register now|' +
+  'verify now|won |lucky|cashback up to|eligible to|eligibility)',
+  'i'
+);
+
+const DEBIT_WORDS = /\b(debited|spent|withdrawn|withdrawal|paid|sent|purchase|charged|payment)\b/i;
+const CREDIT_WORDS = /\b(credited|received|deposited|refund|cashback|salary|credit)\b/i;
+
+// Parse a single "DD MMM YYYY HH:MM (AM|PM)?" style date if present.
+function parseLooseDate(text) {
+  if (!text) return null;
+  // 1) DD-MM-YY or DD/MM/YYYY  (Indian convention)
+  let m = text.match(/\b(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})\b/);
+  if (m) {
+    const day = +m[1], month = +m[2] - 1;
+    let yr = +m[3];
+    if (yr < 100) yr += 2000;
+    const d = new Date(yr, month, day);
+    if (!isNaN(d)) return d.getTime();
+  }
+  // 2) DD MMM YYYY HH:MM(AM/PM)?   e.g. "Apr 20 2024 9:26 PM" or "20 Apr 2024 21:35"
+  m = text.match(
+    /\b(?:(\d{1,2})\s+)?(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{1,2})?(?:\s+|,\s*)(\d{2,4})(?:\s+(\d{1,2}):(\d{2})\s*(AM|PM)?)?/i
+  );
+  if (m) {
+    const day = +(m[1] || m[3] || 1);
+    const monNames = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+    const month = monNames.indexOf(m[2].toLowerCase());
+    let yr = +m[4];
+    if (yr < 100) yr += 2000;
+    let hr = +(m[5] || 0);
+    const min = +(m[6] || 0);
+    if (m[7]?.toUpperCase() === 'PM' && hr < 12) hr += 12;
+    if (m[7]?.toUpperCase() === 'AM' && hr === 12) hr = 0;
+    const d = new Date(yr, month, day, hr, min);
+    if (!isNaN(d)) return d.getTime();
+  }
+  return null;
+}
+
 function parseSms(raw) {
   const text = raw || '';
-  const amountMatch = text.match(/(?:Rs\.?|INR|₹)\s*([0-9,]+(?:\.\d{1,2})?)/i);
-  const amount = amountMatch ? Number(amountMatch[1].replace(/,/g, '')) : null;
 
-  const typeDebit = /(debited|spent|withdrawn|paid|sent|purchase|charged)/i.test(text);
-  const typeCredit = /(credited|received|deposited|refund|cashback)/i.test(text);
-  const txnType = typeDebit ? 'debit' : typeCredit ? 'credit' : 'debit';
+  // Reject obvious promotional / phishing content outright
+  if (SPAM_RE.test(text)) {
+    return { amount: null, txnType: null, aliasGuess: null, date: Date.now(), rejectedAs: 'spam' };
+  }
 
+  // Find all currency amounts; pick the one nearest a transaction verb,
+  // otherwise the first one. This avoids confusing the "available balance"
+  // with the actual transaction amount.
+  const amountRe = /(?:Rs\.?|INR|₹)\s*([0-9,]+(?:\.\d{1,2})?)/gi;
+  const matches = [...text.matchAll(amountRe)];
+  if (matches.length === 0) {
+    return { amount: null, txnType: null, aliasGuess: null, date: Date.now(), rejectedAs: 'no-amount' };
+  }
+
+  let best = matches[0];
+  let bestScore = -1;
+  for (const m of matches) {
+    const idx = m.index ?? 0;
+    const near = text.slice(Math.max(0, idx - 40), Math.min(text.length, idx + m[0].length + 40));
+    // Prefer amounts near a verb and away from "bal"/"balance"/"available"
+    let score = 0;
+    if (DEBIT_WORDS.test(near) || CREDIT_WORDS.test(near)) score += 5;
+    if (/\b(bal|balance|available|avail)\b/i.test(near)) score -= 3;
+    if (score > bestScore) { bestScore = score; best = m; }
+  }
+  const amount = Number(best[1].replace(/,/g, ''));
+  if (!amount || !isFinite(amount)) {
+    return { amount: null, txnType: null, aliasGuess: null, date: Date.now(), rejectedAs: 'no-amount' };
+  }
+
+  // Detect txnType from the words IMMEDIATELY around the chosen amount.
+  const idx = best.index ?? 0;
+  const near = text.slice(Math.max(0, idx - 40), Math.min(text.length, idx + best[0].length + 40));
+  let txnType;
+  if (CREDIT_WORDS.test(near) && !DEBIT_WORDS.test(near)) txnType = 'credit';
+  else if (DEBIT_WORDS.test(near) && !CREDIT_WORDS.test(near)) txnType = 'debit';
+  else {
+    // ambiguous near the amount — fall back to whichever verb appears first in the whole body
+    const cIdx = text.search(CREDIT_WORDS);
+    const dIdx = text.search(DEBIT_WORDS);
+    if (cIdx === -1 && dIdx === -1) {
+      return { amount, txnType: null, aliasGuess: null, date: Date.now(), rejectedAs: 'no-verb' };
+    }
+    if (cIdx === -1) txnType = 'debit';
+    else if (dIdx === -1) txnType = 'credit';
+    else txnType = cIdx < dIdx ? 'credit' : 'debit';
+  }
+
+  // Account hint
   const acctMatch = text.match(/(?:A\/c|Card|ending|XX|xx)\s*[*x]*\s*(\d{4,})/i);
   const aliasGuess = acctMatch ? `XX${acctMatch[1]}` : null;
 
-  const dateMatch = text.match(/(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})/);
-  const date = dateMatch ? new Date(dateMatch[1]).getTime() : Date.now();
+  // Date — try richer formats; fall back to "now" only if absolutely nothing parses.
+  const date = parseLooseDate(text) ?? Date.now();
 
   return { amount, txnType, aliasGuess, date };
 }
@@ -478,22 +562,51 @@ function Pager({ page, totalPages, onChange, visible, total }) {
 
 function AddSmsModal({ open, onClose }) {
   const [text, setText] = useState('');
-  const { success } = useToast();
+  const [dateTime, setDateTime] = useState(todayLocalISO());
+  const [autoDate, setAutoDate] = useState(true); // when true, follow parsed date as user types
+  const { success, error } = useToast();
+
+  useEffect(() => {
+    if (open) {
+      setText('');
+      setDateTime(todayLocalISO());
+      setAutoDate(true);
+    }
+  }, [open]);
+
+  // Live-preview parse: as the user types, surface what we'd save.
+  const preview = text ? parseSms(text) : null;
+
+  useEffect(() => {
+    if (!autoDate) return;
+    if (preview?.date) {
+      const d = new Date(preview.date);
+      d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+      setDateTime(d.toISOString().slice(0, 16));
+    }
+  }, [preview?.date, autoDate]);
+
   const submit = async () => {
     const trimmed = text.trim();
     if (!trimmed) return;
     const parsed = parseSms(trimmed);
+    if (!parsed.amount || !parsed.txnType) {
+      error('Could not find an amount + transaction verb in this SMS. Edit it or use Add Transaction manually.');
+      return;
+    }
+    const ts = new Date(dateTime).getTime();
     await db.smsQueue.add({
       rawSms: trimmed,
-      parsedData: parsed,
+      parsedData: { ...parsed, date: ts },
       status: 'pending',
-      dateTime: parsed.date,
+      dateTime: ts,
       linkedTxnId: null
     });
     setText('');
     success('SMS added to inbox');
     onClose?.();
   };
+
   return (
     <Modal
       open={open}
@@ -509,11 +622,37 @@ function AddSmsModal({ open, onClose }) {
       <p className="text-xs text-muted-fg mb-2">Paste a bank/UPI SMS — we'll try to extract amount, account, and type.</p>
       <textarea
         rows={6}
-        className="fs-input"
+        className="fs-input mb-3"
         placeholder="e.g. Rs.350 debited from A/c XX7890 on 12-08-25 to PAYTM."
         value={text}
         onChange={(e) => setText(e.target.value)}
       />
+      <div>
+        <label className="text-xs font-medium text-muted-fg mb-1.5 block">
+          Date &amp; time {autoDate && '(auto-detected — edit to override)'}
+        </label>
+        <input
+          type="datetime-local"
+          className="fs-input"
+          value={dateTime}
+          onChange={(e) => { setDateTime(e.target.value); setAutoDate(false); }}
+        />
+      </div>
+      {preview?.amount && preview?.txnType && (
+        <div className="mt-3 text-xs flex flex-wrap gap-1.5">
+          <span className="fs-chip">₹ {Number(preview.amount).toLocaleString('en-IN')}</span>
+          <span className={`fs-chip ${preview.txnType === 'credit' ? 'text-success' : 'text-danger'}`}>
+            {preview.txnType}
+          </span>
+          {preview.aliasGuess && <span className="fs-chip">{preview.aliasGuess}</span>}
+        </div>
+      )}
+      {text && !preview?.amount && (
+        <p className="text-[11px] text-warning mt-2">⚠ Couldn't extract an amount from this SMS.</p>
+      )}
+      {text && preview?.amount && !preview?.txnType && (
+        <p className="text-[11px] text-warning mt-2">⚠ Looks like a non-transaction SMS (no debit/credit verb).</p>
+      )}
     </Modal>
   );
 }
@@ -524,10 +663,28 @@ function SmsRow({ sms, accounts }) {
     (a.aliases ?? []).some((al) => aliasMatchesAccountNumber(al, sms.parsedData?.aliasGuess ?? '')) ||
     (sms.parsedData?.aliasGuess && a.number && String(a.number).endsWith(sms.parsedData.aliasGuess.replace(/[X*]/g, '')))
   );
-  // X button = soft dismiss (preserves nativeId so re-import won't bring it back)
   const dismiss = async () => {
     await db.smsQueue.update(sms.id, { status: 'dismissed' });
   };
+
+  // Build the "initial" payload that prefills the main TransactionSheet
+  const initial = useMemo(() => {
+    const ts = sms.dateTime ?? sms.parsedData?.date ?? Date.now();
+    const localIso = (() => {
+      const d = new Date(ts);
+      d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+      return d.toISOString().slice(0, 16);
+    })();
+    return {
+      dateTime: localIso,
+      accountId: matched?.id ?? '',
+      amount: sms.parsedData?.amount ? String(sms.parsedData.amount) : '',
+      txnType: sms.parsedData?.txnType ?? 'debit',
+      description: sms.rawSms?.slice(0, 140) ?? '',
+      tags: ''
+    };
+  }, [sms, matched]);
+
   return (
     <li className="p-3">
       <div className="flex items-start gap-3">
@@ -553,136 +710,13 @@ function SmsRow({ sms, accounts }) {
       <div className="mt-2 flex justify-end gap-2">
         <button className="fs-btn-primary text-xs px-3 py-1.5" onClick={() => setOpen(true)}>Convert to transaction</button>
       </div>
-      <SmsConvertModal open={open} onClose={() => setOpen(false)} sms={sms} matched={matched} />
+      <TransactionSheet
+        open={open}
+        onClose={() => setOpen(false)}
+        initial={initial}
+        smsLink={sms.id}
+      />
     </li>
   );
 }
 
-function SmsConvertModal({ open, onClose, sms, matched }) {
-  const { success, error } = useToast();
-  const accounts = useLiveQuery(() => db.accounts.toArray(), [], []);
-  const categories = useLiveQuery(() => db.categories.toArray(), [], []);
-  const profiles = useLiveQuery(() => db.profiles.toArray(), [], []);
-  const allTxns = useLiveQuery(() => db.transactions.toArray(), [], []);
-
-  const [form, setForm] = useState({
-    profileId: '',
-    accountId: matched?.id ?? '',
-    category: '',
-    subCategory: '',
-    description: '',
-    tags: ''
-  });
-
-  useEffect(() => {
-    if (!open) return;
-    setForm((f) => ({
-      ...f,
-      accountId: matched?.id ?? f.accountId,
-      profileId: profiles[0]?.id ?? f.profileId
-    }));
-  }, [open, matched, profiles]);
-
-  const categorySuggestions = Array.from(new Set([
-    ...categories.filter((c) => c.parentId == null).map((c) => c.name),
-    ...allTxns.map((t) => categories.find((c) => c.id === t.categoryId)?.name).filter(Boolean)
-  ]));
-  const subSuggestions = form.category ? categories.filter((c) =>
-    c.parentId === categories.find((p) => p.name === form.category && p.parentId == null)?.id
-  ).map((c) => c.name) : [];
-
-  const save = async () => {
-    try {
-      const amt = Number(sms.parsedData?.amount ?? 0);
-      if (!amt) throw new Error('No amount parsed — edit the SMS or add the transaction manually.');
-      if (!form.profileId) throw new Error('Pick a profile');
-      if (!form.accountId) throw new Error('Pick an account');
-      if (!form.category) throw new Error('Pick or type a category');
-
-      let cat = await db.categories.where({ name: form.category }).filter((c) => c.parentId == null).first();
-      if (!cat) {
-        const id = await db.categories.add({ name: form.category, parentId: null, icon: '🏷️', color: '#94a3b8', type: 'expense' });
-        cat = await db.categories.get(id);
-      }
-      let sub = null;
-      if (form.subCategory) {
-        sub = await db.categories.where({ name: form.subCategory, parentId: cat.id }).first();
-        if (!sub) {
-          const id = await db.categories.add({ name: form.subCategory, parentId: cat.id, icon: cat.icon, color: cat.color, type: cat.type });
-          sub = await db.categories.get(id);
-        }
-      }
-      const tags = form.tags.split(',').map((s) => s.trim()).filter(Boolean);
-      const txnDateTime = sms.dateTime ?? sms.parsedData?.date ?? Date.now();
-      const txnType = sms.parsedData?.txnType ?? 'debit';
-      const selectedAccount = accounts.find((a) => a.id === Number(form.accountId));
-      const txnId = await db.transactions.add({
-        slNo: 0,
-        dateTime: txnDateTime,
-        profileId: Number(form.profileId),
-        accountId: Number(form.accountId),
-        categoryId: cat.id,
-        subCategoryId: sub?.id ?? null,
-        amount: amt,
-        txnType,
-        paymentMode: selectedAccount?.type ?? 'bank',
-        description: form.description ?? '',
-        tags,
-        source: 'sms'
-      });
-      await reindexSlNo();
-      if (selectedAccount) {
-        const delta = (txnType === 'credit' ? 1 : -1) * amt;
-        await db.accounts.update(selectedAccount.id, {
-          balance: Number(selectedAccount.balance ?? 0) + delta
-        });
-      }
-      await db.smsQueue.update(sms.id, { status: 'processed', linkedTxnId: txnId });
-      success('Transaction created — view it in the Transactions tab');
-      onClose?.();
-    } catch (e) {
-      error(e.message);
-    }
-  };
-
-  return (
-    <Modal
-      open={open}
-      onClose={onClose}
-      title="Convert SMS to transaction"
-      size="lg"
-      footer={
-        <>
-          <button className="fs-btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="fs-btn-primary" onClick={save}>Create transaction</button>
-        </>
-      }
-    >
-      <p className="text-xs text-muted-fg italic mb-3">{sms.rawSms}</p>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Profile">
-          <Select value={form.profileId} onChange={(v) => setForm({ ...form, profileId: v })}
-            options={[{ value: '', label: 'Pick…' }, ...profiles.map((p) => ({ value: p.id, label: p.name }))]} />
-        </Field>
-        <Field label="Account">
-          <Select value={form.accountId} onChange={(v) => setForm({ ...form, accountId: v })}
-            options={[{ value: '', label: 'Pick…' }, ...accounts.map((a) => ({ value: a.id, label: a.name }))]} />
-        </Field>
-      </div>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Category">
-          <Combobox value={form.category} onChange={(v) => setForm({ ...form, category: v, subCategory: '' })} suggestions={categorySuggestions} />
-        </Field>
-        <Field label="Sub-category">
-          <Combobox value={form.subCategory} onChange={(v) => setForm({ ...form, subCategory: v })} suggestions={subSuggestions} />
-        </Field>
-      </div>
-      <Field label="Description">
-        <input className="fs-input" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
-      </Field>
-      <Field label="Tags" hint="comma separated">
-        <input className="fs-input" value={form.tags} onChange={(e) => setForm({ ...form, tags: e.target.value })} />
-      </Field>
-    </Modal>
-  );
-}

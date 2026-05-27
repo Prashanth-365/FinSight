@@ -8,8 +8,9 @@ import { Field } from '@/components/ui/Input.jsx';
 import { Select } from '@/components/ui/Select.jsx';
 import { useToast } from '@/components/ui/Toast.jsx';
 import { SectionHeader } from './Profiles.jsx';
-import { maskNumber, cn } from '@/lib/utils.js';
+import { maskNumber, cn, getAccountBalance } from '@/lib/utils.js';
 import { formatINR } from '@/lib/currency.js';
+import { Avatar } from '@/components/ui/Avatar.jsx';
 
 const TYPES = [
   { value: 'bank', label: 'Bank', icon: Landmark },
@@ -62,7 +63,7 @@ export default function Accounts() {
                   <div className="flex-1 min-w-0">
                     <p className="font-medium text-sm">{a.name}</p>
                     <p className="text-xs text-muted-fg">
-                      {maskNumber(a.number)} · {formatINR(a.balance ?? 0, { hidePaise: true })}
+                      {maskNumber(a.number)} · {formatINR(getAccountBalance(a, null), { hidePaise: true })}
                     </p>
                   </div>
                   <span className="fs-chip text-[10px] uppercase">{a.type}</span>
@@ -106,9 +107,25 @@ function AccountEditor({ open, onClose, editing, profiles }) {
 
   useEffect(() => {
     if (!open) return;
-    setForm(editing
-      ? { ...blank(), ...editing, aliases: editing.aliases ?? [], profileIds: editing.profileIds ?? [] }
-      : blank());
+    if (editing) {
+      // Migrate legacy single-balance to per-profile balances on first edit.
+      const balances = editing.balances && typeof editing.balances === 'object'
+        ? { ...editing.balances }
+        : {};
+      if (!editing.balances && editing.balance != null && (editing.profileIds ?? []).length > 0) {
+        // attribute the existing single balance to the first linked profile
+        balances[String(editing.profileIds[0])] = Number(editing.balance);
+      }
+      setForm({
+        ...blank(),
+        ...editing,
+        balances,
+        aliases: editing.aliases ?? [],
+        profileIds: editing.profileIds ?? []
+      });
+    } else {
+      setForm(blank());
+    }
   }, [open, editing]);
 
   function blank() {
@@ -116,7 +133,7 @@ function AccountEditor({ open, onClose, editing, profiles }) {
       name: '',
       type: 'bank',
       number: '',
-      balance: '',
+      balances: {},     // { [profileId]: number }
       color: COLORS[0],
       isActive: 1,
       profileIds: [],
@@ -126,9 +143,20 @@ function AccountEditor({ open, onClose, editing, profiles }) {
   }
 
   const toggleProfile = (id) => {
+    setForm((f) => {
+      const has = f.profileIds.includes(id);
+      const profileIds = has ? f.profileIds.filter((x) => x !== id) : [...f.profileIds, id];
+      const balances = { ...f.balances };
+      if (has) delete balances[String(id)];
+      else if (!(String(id) in balances)) balances[String(id)] = 0;
+      return { ...f, profileIds, balances };
+    });
+  };
+
+  const setBalance = (profileId, raw) => {
     setForm((f) => ({
       ...f,
-      profileIds: f.profileIds.includes(id) ? f.profileIds.filter((x) => x !== id) : [...f.profileIds, id]
+      balances: { ...f.balances, [String(profileId)]: raw === '' ? '' : Number(raw) }
     }));
   };
 
@@ -143,11 +171,18 @@ function AccountEditor({ open, onClose, editing, profiles }) {
     try {
       if (!form.name.trim()) throw new Error('Name required');
       if (form.profileIds.length === 0) throw new Error('Pick at least one profile');
+      // Coerce balances to numbers, only for currently selected profiles
+      const balances = {};
+      for (const pid of form.profileIds) {
+        const raw = form.balances[String(pid)];
+        balances[String(pid)] = raw === '' || raw == null ? 0 : Number(raw);
+      }
       const payload = {
         name: form.name.trim(),
         type: form.type,
         number: form.number ?? '',
-        balance: Number(form.balance || 0),
+        balances,
+        balance: null, // clear legacy field
         color: form.color,
         isActive: 1,
         profileIds: form.profileIds.map(Number),
@@ -186,9 +221,6 @@ function AccountEditor({ open, onClose, editing, profiles }) {
         <Field label="Account / card number">
           <input className="fs-input" value={form.number} onChange={(e) => setForm({ ...form, number: e.target.value })} placeholder="50100123457890" />
         </Field>
-        <Field label="Balance (₹)" hint="For card type, use a negative number if outstanding">
-          <input inputMode="decimal" className="fs-input" value={form.balance} onChange={(e) => setForm({ ...form, balance: e.target.value })} placeholder="0" />
-        </Field>
       </div>
 
       <Field label="Color">
@@ -205,7 +237,7 @@ function AccountEditor({ open, onClose, editing, profiles }) {
         </div>
       </Field>
 
-      <Field label="Visible to profiles" hint="Master always sees everything">
+      <Field label="Visible to profiles" hint="Each linked profile gets its own balance below">
         <div className="flex flex-wrap gap-2">
           {profiles.map((p) => {
             const active = form.profileIds.includes(p.id);
@@ -225,6 +257,32 @@ function AccountEditor({ open, onClose, editing, profiles }) {
           })}
         </div>
       </Field>
+
+      {form.profileIds.length > 0 && (
+        <Field
+          label="Balance per profile (₹)"
+          hint="For credit cards, use a negative value if there's an outstanding balance"
+        >
+          <div className="space-y-2">
+            {form.profileIds.map((pid) => {
+              const profile = profiles.find((p) => p.id === pid);
+              return (
+                <div key={pid} className="flex items-center gap-2">
+                  <Avatar size="sm" name={profile?.name} avatar={profile?.avatar} color={profile?.color} />
+                  <span className="text-sm flex-1 truncate">{profile?.name ?? `#${pid}`}</span>
+                  <input
+                    inputMode="decimal"
+                    className="fs-input w-36 text-right"
+                    value={form.balances[String(pid)] ?? ''}
+                    onChange={(e) => setBalance(pid, e.target.value)}
+                    placeholder="0"
+                  />
+                </div>
+              );
+            })}
+          </div>
+        </Field>
+      )}
 
       <Field
         label="SMS aliases"

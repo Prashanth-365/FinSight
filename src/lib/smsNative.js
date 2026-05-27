@@ -33,17 +33,44 @@ export async function ensureSmsPermission() {
 
 // Default sender substrings used to find bank/UPI SMS in the user's inbox.
 // They are case-insensitive substring matches on the SMS "from" field.
+// We aim wide on banks + wallets + payment apps; spam is filtered at the body
+// level (see TXN_BODY_KEYWORDS / SPAM_KEYWORDS below).
 export const DEFAULT_BANK_SENDERS = [
-  'HDFC', 'ICICI', 'SBI', 'AXIS', 'KOTAK', 'YESBNK', 'IDBI', 'PNB', 'BOI',
-  'IDFC', 'INDUS', 'CITI', 'HSBC', 'STANC', 'AU', 'RBL', 'CANBNK', 'UBI',
-  'PAYTM', 'PHONEPE', 'GPAY', 'BHIM', 'AMEX',
-  'BK', 'BNK'
+  // Major Indian banks
+  'HDFC', 'ICICI', 'SBI', 'AXIS', 'KOTAK', 'YESBNK', 'IDBI', 'PNB', 'BOI', 'BOB',
+  'IDFC', 'INDUS', 'CITI', 'HSBC', 'STANC', 'RBL', 'CANBNK', 'CANARA', 'UBI',
+  'UNIBNK', 'INDBNK', 'INDIANBK', 'CENTBK', 'OBC', 'COSMOS', 'BANDHAN',
+  'KARUR', 'KARVY', 'KARNATAKA', 'KBL', 'KVB', 'KMBL', 'KMB', 'EQUITAS',
+  'AUFIN', 'AUBANK', 'ESAF', 'JANA', 'SURYODAY', 'UJJIVAN', 'FINCARE', 'UTKARSH',
+  'CSB', 'CUB', 'DCB', 'DBS', 'FBL', 'FEDBNK', 'FEDERAL', 'TMB', 'JKB', 'NAINI',
+  'SIB', 'SOUTHIND', 'PSB', 'SCB', 'IOBINDIA', 'IOB', 'UCO',
+  // UPI / wallets / payment apps
+  'PAYTM', 'PHONEPE', 'GPAY', 'BHIM', 'AMAZ', 'AMZNPY', 'AIRTEL', 'AIRPAY',
+  'JIO', 'JIOPAY', 'FREECH', 'MOBIKW', 'MOBIQK', 'MBKWIK', 'OLA', 'OLAPAY',
+  'RAZORP', 'RAZPAY', 'RWALL', 'RWLLT', 'JUSPAY', 'CRED', 'CREDPLUS', 'SLICE',
+  'NIYO', 'FI', 'JUPITER', 'UNIORG', 'LAZYPAY', 'SIMPL', 'POSTPE',
+  // Card networks / NBFCs
+  'AMEX', 'VISA', 'MASTER', 'RUPAY', 'BAJFIN', 'BAJAJF', 'BAJAJ',
+  // Generic substrings — last resort
+  'BK', 'BNK', 'BANK', 'PAY', 'UPI', 'CARD'
 ];
 
-// Body keywords that very strongly indicate a transaction SMS
+// Body keywords that strongly indicate a transaction SMS
 export const TXN_BODY_KEYWORDS = [
-  'debited', 'credited', 'spent', 'paid', 'received', 'transferred',
-  'withdrawn', 'deposit', 'purchase', 'refund', 'a/c', 'acct', 'upi'
+  'debited', 'credited', 'spent', 'paid', 'received', 'transferred', 'transfer',
+  'withdrawn', 'deposit', 'purchase', 'refund', 'cashback', 'sent', 'recd',
+  'a/c', 'acct', 'account', 'upi', 'imps', 'neft', 'rtgs', 'wallet', 'rwallet',
+  'available bal', 'avail bal', 'balance'
+];
+
+// Strong negative markers — if the body matches any of these, it's almost
+// always promotional / spam / phishing and we reject it outright.
+export const SPAM_KEYWORDS = [
+  'congratulations', 'pre-?approved', 'click here', 'apply now', 'hurry',
+  'offer ends', 'limited offer', 'limited time', 'voucher', 'coupon',
+  't&c', 'terms and conditions', 'terms apply', 'know more',
+  'lifetime free', 'reward points', 'sign up', 'register now', 'verify now',
+  'win ', 'won ', 'lucky', 'cashback up to', 'eligible to', 'eligibility'
 ];
 
 export async function fetchSmsHistory({ sinceTs = 0, limit = 2000 } = {}) {

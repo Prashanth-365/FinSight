@@ -7,7 +7,7 @@ import { Card, CardBody, CardHeader, CardTitle, CardSubtitle } from '@/component
 import { EmptyState } from '@/components/ui/Empty.jsx';
 import { Avatar } from '@/components/ui/Avatar.jsx';
 import { formatINR, formatINRShort, formatPercent } from '@/lib/currency.js';
-import { fmtDate, maskNumber, cn } from '@/lib/utils.js';
+import { fmtDate, maskNumber, cn, getAccountBalance } from '@/lib/utils.js';
 import { useOutletContext, Link } from 'react-router-dom';
 
 const ACCOUNT_ICONS = { bank: Landmark, card: CreditCard, wallet: Wallet };
@@ -46,7 +46,7 @@ export default function Home() {
   const { assets, liabilities, invested, currentValue } = useMemo(() => {
     let assets = 0, liabilities = 0;
     for (const a of filteredAccounts) {
-      const bal = Number(a.balance ?? 0);
+      const bal = getAccountBalance(a, activeProfileId);
       if (a.type === 'card') liabilities += Math.max(0, -bal); // negative bal on card = outstanding
       else assets += bal;
     }
@@ -168,9 +168,11 @@ export default function Home() {
                     <span className="fs-chip text-[10px] uppercase tracking-wider">{a.type}</span>
                   </div>
                   <div className="pt-1">
-                    <p className="text-xs text-muted-fg">Balance</p>
+                    <p className="text-xs text-muted-fg">
+                      Balance{!isMasterView ? ` · ${activeProfile?.name ?? ''}` : ''}
+                    </p>
                     <p className="text-lg font-semibold">
-                      {show ? formatINR(a.balance ?? 0, { hidePaise: true }) : '••••••'}
+                      {show ? formatINR(getAccountBalance(a, activeProfileId), { hidePaise: true }) : '••••••'}
                     </p>
                   </div>
                 </div>

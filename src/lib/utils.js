@@ -85,3 +85,55 @@ export function maskNumber(num) {
 export function isPositiveNumber(v) {
   return typeof v === 'number' && isFinite(v) && v > 0;
 }
+
+// Per-profile balance helpers ---------------------------------------------
+// Accounts now store balances as { [profileId]: number }. Legacy accounts
+// have a single `balance` field; we read it transparently and migrate on write.
+
+export function getAccountBalance(account, profileId = null) {
+  if (!account) return 0;
+  if (account.balances && typeof account.balances === 'object') {
+    if (profileId == null) {
+      return Object.values(account.balances).reduce((s, v) => s + Number(v ?? 0), 0);
+    }
+    return Number(account.balances[profileId] ?? 0);
+  }
+  // legacy: single balance applies to whichever profile owns this txn
+  return Number(account.balance ?? 0);
+}
+
+// Map a freeform sub-category name (e.g. "Mutual Fund") onto the canonical
+// platform key used by the Investments page ("MF", "Stock", etc.). Free-typed
+// platforms fall through to "Other".
+const PLATFORM_FROM_SUBCAT = {
+  'mutual fund': 'MF', 'mutual funds': 'MF', 'mf': 'MF', 'sip': 'MF',
+  'stock': 'Stock', 'stocks': 'Stock', 'equity': 'Stock', 'shares': 'Stock',
+  'gold': 'Gold', 'sgb': 'Gold', 'gold etf': 'Gold',
+  'fd': 'FD', 'fixed deposit': 'FD', 'rd': 'FD', 'recurring deposit': 'FD',
+  'ppf': 'PPF',
+  'epf': 'EPF', 'pf': 'EPF',
+  'nps': 'Other', 'elss': 'MF',
+  'crypto': 'Crypto', 'cryptocurrency': 'Crypto', 'bitcoin': 'Crypto', 'ethereum': 'Crypto',
+  'chit': 'Chit', 'chit fund': 'Chit', 'chits': 'Chit'
+};
+export function inferInvestmentPlatform(subCategoryName) {
+  if (!subCategoryName) return 'Other';
+  return PLATFORM_FROM_SUBCAT[String(subCategoryName).toLowerCase().trim()] ?? 'Other';
+}
+
+// Returns the new `balances` object to persist after a transaction. Use with
+// `db.accounts.update(account.id, { balances: ... , balance: undefined })`.
+export function applyTxnDeltaToBalances(account, profileId, delta) {
+  const key = String(profileId);
+  if (account?.balances && typeof account.balances === 'object') {
+    return {
+      ...account.balances,
+      [key]: Number(account.balances[key] ?? 0) + delta
+    };
+  }
+  // Promote legacy balance to the new shape, attributing the existing total
+  // to the profile that owns this transaction.
+  return {
+    [key]: Number(account?.balance ?? 0) + delta
+  };
+}

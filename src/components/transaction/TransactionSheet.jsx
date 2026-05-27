@@ -7,7 +7,7 @@ import { Combobox } from '@/components/ui/Combobox.jsx';
 import { Select } from '@/components/ui/Select.jsx';
 import { useProfile } from '@/context/ProfileContext.jsx';
 import { useToast } from '@/components/ui/Toast.jsx';
-import { freqSorted, todayLocalISO, maskNumber } from '@/lib/utils.js';
+import { freqSorted, todayLocalISO, maskNumber, applyTxnDeltaToBalances, getAccountBalance, inferInvestmentPlatform } from '@/lib/utils.js';
 import { formatINR } from '@/lib/currency.js';
 import { ArrowDownLeft, ArrowUpRight, Users } from 'lucide-react';
 import { Link } from 'react-router-dom';
@@ -23,16 +23,18 @@ const empty = (profileId) => ({
   amount: '',
   txnType: 'debit',
   description: '',
-  tags: ''
+  tags: '',
+  investmentName: '' // used only when category resolves to type='investment'
 });
 
-export function TransactionSheet({ open, onClose, editing = null, initial = null }) {
+export function TransactionSheet({ open, onClose, editing = null, initial = null, smsLink = null }) {
   const { profiles, activeProfileId } = useProfile();
   const { success, error } = useToast();
 
   const accounts = useLiveQuery(() => db.accounts.toArray(), [], []);
   const categories = useLiveQuery(() => db.categories.toArray(), [], []);
   const allTxns = useLiveQuery(() => db.transactions.toArray(), [], []);
+  const investments = useLiveQuery(() => db.investments.toArray(), [], []);
 
   const [form, setForm] = useState(empty(activeProfileId));
 
@@ -41,6 +43,9 @@ export function TransactionSheet({ open, onClose, editing = null, initial = null
     if (editing) {
       const cat = categories.find((c) => c.id === editing.categoryId);
       const sub = categories.find((c) => c.id === editing.subCategoryId);
+      const linkedInv = editing.investmentId
+        ? investments.find((i) => i.id === editing.investmentId)
+        : null;
       setForm({
         id: editing.id,
         dateTime: new Date(editing.dateTime).toISOString().slice(0, 16),
@@ -51,7 +56,8 @@ export function TransactionSheet({ open, onClose, editing = null, initial = null
         amount: String(editing.amount ?? ''),
         txnType: editing.txnType ?? 'debit',
         description: editing.description ?? '',
-        tags: (editing.tags ?? []).join(', ')
+        tags: (editing.tags ?? []).join(', '),
+        investmentName: linkedInv?.name ?? ''
       });
     } else {
       setForm({ ...empty(activeProfileId), ...(initial ?? {}) });
@@ -86,7 +92,30 @@ export function TransactionSheet({ open, onClose, editing = null, initial = null
 
   const selectedAccount = accounts.find((a) => a.id === Number(form.accountId));
 
-  const save = async () => {
+  // Is the typed category an "investment" type? Two signals:
+  //   (a) it exists in db.categories with type='investment', or
+  //   (b) the typed name (case-insensitive) equals "investment" (covers brand-new typing).
+  const isInvestmentCategory = useMemo(() => {
+    if (!form.category) return false;
+    const lc = form.category.toLowerCase().trim();
+    if (lc === 'investment' || lc === 'investments') return true;
+    const cat = categories.find((c) => c.name.toLowerCase() === lc && c.parentId == null);
+    return cat?.type === 'investment';
+  }, [form.category, categories]);
+
+  // Suggestions for the holding picker: existing investments filtered by inferred
+  // platform under the active profile.
+  const investmentSuggestions = useMemo(() => {
+    if (!isInvestmentCategory) return [];
+    const platform = inferInvestmentPlatform(form.subCategory);
+    return investments
+      .filter((i) => (!form.profileId || i.profileId === Number(form.profileId)) &&
+                     (!platform || platform === 'Other' || i.platform === platform))
+      .map((i) => ({ value: i.name, label: i.name, hint: i.platform }));
+  }, [investments, form.profileId, form.subCategory, isInvestmentCategory]);
+
+  // `mode` = 'close' (default — save and close)  or  'continue' (save & add another)
+  const save = async (mode = 'close') => {
     try {
       if (!form.profileId) throw new Error('Please pick a profile.');
       if (!form.accountId) throw new Error('Please pick an account.');
@@ -116,8 +145,37 @@ export function TransactionSheet({ open, onClose, editing = null, initial = null
       const dateTime = new Date(form.dateTime).getTime();
       const tags = (form.tags ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 
+      // If this is an investment-type category and the user supplied/picked a
+      // holding name, find-or-create the investment record and capture its id.
+      let investmentId = null;
+      if (isInvestmentCategory && form.investmentName?.trim()) {
+        const platform = inferInvestmentPlatform(form.subCategory);
+        const name = form.investmentName.trim();
+        let inv = investments.find(
+          (i) => i.profileId === Number(form.profileId) &&
+                 i.platform === platform &&
+                 i.name.toLowerCase() === name.toLowerCase()
+        );
+        if (!inv) {
+          const id = await db.investments.add({
+            profileId: Number(form.profileId),
+            platform,
+            name,
+            identifier: null,
+            units: null,
+            investedAmount: 0,
+            currentValue: 0,
+            startDate: dateTime,
+            maturityDate: null,
+            notes: ''
+          });
+          inv = await db.investments.get(id);
+        }
+        investmentId = inv.id;
+      }
+
       const payload = {
-        slNo: 0, // re-indexed below
+        slNo: 0,
         dateTime,
         profileId: Number(form.profileId),
         accountId: Number(form.accountId),
@@ -128,24 +186,76 @@ export function TransactionSheet({ open, onClose, editing = null, initial = null
         paymentMode: selectedAccount?.type ?? 'bank',
         description: form.description ?? '',
         tags,
-        source: 'manual'
+        source: smsLink ? 'sms' : 'manual',
+        investmentId
       };
 
-      if (form.id) await db.transactions.update(form.id, payload);
-      else await db.transactions.add(payload);
+      // When editing, we must first REVERSE the old balance + invested-amount
+      // effects, then re-apply the new ones — otherwise account totals drift.
+      const oldTxn = form.id ? await db.transactions.get(form.id) : null;
+      if (oldTxn) {
+        const oldAccount = await db.accounts.get(oldTxn.accountId);
+        if (oldAccount) {
+          const reverse = (oldTxn.txnType === 'credit' ? -1 : 1) * Number(oldTxn.amount ?? 0);
+          const balances = applyTxnDeltaToBalances(oldAccount, oldTxn.profileId, reverse);
+          await db.accounts.update(oldAccount.id, { balances, balance: null });
+        }
+        if (oldTxn.investmentId) {
+          const oldInv = await db.investments.get(oldTxn.investmentId);
+          if (oldInv) {
+            const invReverse = (oldTxn.txnType === 'credit' ? 1 : -1) * Number(oldTxn.amount ?? 0);
+            await db.investments.update(oldInv.id, {
+              investedAmount: Math.max(0, Number(oldInv.investedAmount ?? 0) + invReverse)
+            });
+          }
+        }
+      }
+
+      let txnId;
+      if (form.id) {
+        txnId = form.id;
+        await db.transactions.update(form.id, payload);
+      } else {
+        txnId = await db.transactions.add(payload);
+      }
 
       await reindexSlNo();
 
-      // update account balance heuristically
+      // Apply new balance delta on the chosen account
       if (selectedAccount) {
         const delta = (form.txnType === 'credit' ? 1 : -1) * amt;
-        await db.accounts.update(selectedAccount.id, {
-          balance: Number(selectedAccount.balance ?? 0) + delta
-        });
+        const balances = applyTxnDeltaToBalances(selectedAccount, Number(form.profileId), delta);
+        await db.accounts.update(selectedAccount.id, { balances, balance: null });
+      }
+
+      // Apply new invested-amount delta (debit on an investment row = money in)
+      if (investmentId) {
+        const inv = await db.investments.get(investmentId);
+        if (inv) {
+          const invDelta = (form.txnType === 'credit' ? -1 : 1) * amt;
+          const nextInvested = Math.max(0, Number(inv.investedAmount ?? 0) + invDelta);
+          const nextCurrent = Math.max(Number(inv.currentValue ?? 0), nextInvested);
+          await db.investments.update(investmentId, {
+            investedAmount: nextInvested,
+            currentValue: nextCurrent
+          });
+        }
+      }
+
+      // Mark the originating SMS as processed (when this sheet was opened from an SMS row)
+      if (smsLink) {
+        await db.smsQueue.update(smsLink, { status: 'processed', linkedTxnId: txnId });
       }
 
       success(form.id ? 'Transaction updated' : 'Transaction added');
-      onClose?.();
+
+      if (mode === 'continue' && !form.id) {
+        // Keep the sheet open. Reset only amount + description so you can quickly
+        // add the next one with the same profile/account/category preserved.
+        setForm((f) => ({ ...f, amount: '', description: '' }));
+      } else {
+        onClose?.();
+      }
     } catch (e) {
       error(e.message);
     }
@@ -184,11 +294,22 @@ export function TransactionSheet({ open, onClose, editing = null, initial = null
     <Sheet
       open={open}
       onClose={onClose}
-      title={form.id ? 'Edit transaction' : 'Add transaction'}
+      title={form.id ? 'Edit transaction' : (smsLink ? 'Convert SMS to transaction' : 'Add transaction')}
       footer={
         <>
           <button className="fs-btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="fs-btn-primary" onClick={save}>{form.id ? 'Save changes' : 'Add transaction'}</button>
+          {!form.id && (
+            <button
+              className="fs-btn-secondary"
+              onClick={() => save('continue')}
+              title="Save and keep the sheet open with everything but amount preserved"
+            >
+              Save &amp; add another
+            </button>
+          )}
+          <button className="fs-btn-primary" onClick={() => save('close')}>
+            {form.id ? 'Save changes' : 'Add transaction'}
+          </button>
         </>
       }
     >
@@ -247,7 +368,7 @@ export function TransactionSheet({ open, onClose, editing = null, initial = null
             { value: '', label: 'Pick account…' },
             ...accountOptions.map((a) => ({
               value: a.id,
-              label: `${typeBadge(a.type)} ${a.name} ${maskNumber(a.number)} — ${formatINR(a.balance ?? 0, { hidePaise: true })}`
+              label: `${typeBadge(a.type)} ${a.name} ${maskNumber(a.number)} — ${formatINR(getAccountBalance(a, form.profileId || null), { hidePaise: true })}`
             }))
           ]}
         />
@@ -271,6 +392,21 @@ export function TransactionSheet({ open, onClose, editing = null, initial = null
           />
         </Field>
       </div>
+
+      {isInvestmentCategory && (
+        <Field
+          label="Investment holding"
+          hint={`Linked under ${inferInvestmentPlatform(form.subCategory)}. Pick an existing holding or type a new name to create one.`}
+        >
+          <Combobox
+            value={form.investmentName}
+            onChange={(v) => setForm({ ...form, investmentName: v })}
+            suggestions={investmentSuggestions}
+            placeholder="e.g. Parag Parikh Flexi Cap"
+            emptyHint="Type the holding name — we'll create it on save"
+          />
+        </Field>
+      )}
 
       <Field label="Description">
         <Combobox
