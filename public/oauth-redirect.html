@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FinSight — Signing you in…</title>
+    <style>
+      :root { color-scheme: dark light; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; min-height: 100vh;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        background: #0b1220; color: #e2e8f0; text-align: center; padding: 1.5rem;
+      }
+      .logo {
+        width: 56px; height: 56px; border-radius: 16px; background: rgba(34,211,238,0.15);
+        color: #22d3ee; display: grid; place-items: center; font-size: 28px; margin-bottom: 1rem;
+      }
+      h1 { margin: 0 0 .5rem; font-size: 1.1rem; }
+      p { margin: 0 0 1rem; color: #94a3b8; font-size: 0.85rem; line-height: 1.5; }
+      a.btn {
+        display: inline-block; padding: 0.7rem 1.2rem; border-radius: 12px;
+        background: #22d3ee; color: #0b1220; font-weight: 600; text-decoration: none;
+      }
+      .spinner {
+        width: 28px; height: 28px; border-radius: 999px;
+        border: 3px solid rgba(255,255,255,0.1); border-top-color: #22d3ee;
+        animation: spin 1s linear infinite; margin: 0 auto 1rem;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .small { font-size: 0.75rem; color: #64748b; margin-top: 1.5rem; }
+    </style>
+  </head>
+  <body>
+    <div class="logo">₹</div>
+    <div class="spinner"></div>
+    <h1>Signing you in to FinSight…</h1>
+    <p id="msg">Returning you to the app in a moment.</p>
+    <a class="btn" id="link" href="#">Open FinSight</a>
+    <p class="small">If nothing happens, make sure FinSight is installed and tap the button above.</p>
+
+    <script>
+      // Google may use either the URL fragment (#) for response_type=token,
+      // or the query string (?) for response_type=code. Capture either.
+      var hash = window.location.hash ? window.location.hash.substring(1) : '';
+      var query = window.location.search ? window.location.search.substring(1) : '';
+      var payload = hash || query;
+      var deep = 'com.finsight.app://oauth-success' + (payload ? '#' + payload : '');
+      var link = document.getElementById('link');
+      link.href = deep;
+
+      var triedReplace = false;
+      function jump() {
+        if (triedReplace) return;
+        triedReplace = true;
+        try { window.location.replace(deep); }
+        catch (_) { window.location.href = deep; }
+      }
+      // Give Chrome a tick to settle, then jump.
+      setTimeout(jump, 80);
+
+      // If the user is still here after 4s, the app probably isn't installed
+      // or the deep link didn't fire. Show a clearer instruction.
+      setTimeout(function () {
+        if (document.visibilityState === 'visible') {
+          document.getElementById('msg').textContent =
+            "If FinSight didn't reopen, tap the button below.";
+        }
+      }, 4000);
+    </script>
+  </body>
+</html>

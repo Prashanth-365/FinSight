@@ -1,6 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { Inbox, Plus, Wand2, X, Smartphone, Download, Radio } from 'lucide-react';
+import {
+  Inbox, Plus, Wand2, X, Smartphone, Download, Radio, ChevronLeft, ChevronRight,
+  EyeOff, RotateCcw
+} from 'lucide-react';
 import { db, reindexSlNo, getSetting, setSetting } from '@/db/database.js';
 import {
   isNativeAndroid, ensureSmsPermission, checkSmsPermission, fetchSmsHistory, startSmsListener
@@ -12,8 +15,10 @@ import { Field } from '@/components/ui/Input.jsx';
 import { Combobox } from '@/components/ui/Combobox.jsx';
 import { Select } from '@/components/ui/Select.jsx';
 import { useToast } from '@/components/ui/Toast.jsx';
-import { aliasMatchesAccountNumber, fmtDateTime } from '@/lib/utils.js';
+import { aliasMatchesAccountNumber, fmtDateTime, cn } from '@/lib/utils.js';
 import { formatINR } from '@/lib/currency.js';
+
+/* ───────── Native SMS controls ───────── */
 
 function NativeSmsControls() {
   const [permission, setPermission] = useState('unknown');
@@ -21,6 +26,11 @@ function NativeSmsControls() {
   const [listenerActive, setListenerActive] = useState(false);
   const [lastSync, setLastSync] = useState(null);
   const [stopFn, setStopFn] = useState(null);
+
+  // Progress dialog state
+  const [progressOpen, setProgressOpen] = useState(false);
+  const [progress, setProgress] = useState({ stage: '', read: 0, found: 0, added: 0, total: 0 });
+  const cancelRef = useRef(false);
 
   useEffect(() => {
     (async () => {
@@ -41,20 +51,41 @@ function NativeSmsControls() {
   };
 
   const importHistory = async () => {
+    cancelRef.current = false;
+    setProgress({ stage: 'starting', read: 0, found: 0, added: 0, total: 0 });
+    setProgressOpen(true);
     setBusy('import');
     try {
       const ok = await ensureSmsPermission();
-      if (!ok) { setPermission('denied'); return; }
-      const sinceTs = (await getSetting('sms.lastImportTs', 0)) ?? 0;
-      const { messages } = await fetchSmsHistory({ sinceTs, limit: 5000 });
-      let added = 0;
-      const existingIds = new Set((await db.smsQueue.toArray())
-        .map((s) => s.nativeId).filter(Boolean));
+      if (!ok) { setPermission('denied'); setProgressOpen(false); return; }
+
+      // Always pull the full history (subject to limit). Dedup by nativeId against
+      // ALL existing queue rows — pending, processed, AND dismissed — so a row
+      // you've manually dismissed won't reappear on a future import.
+      setProgress((p) => ({ ...p, stage: 'reading' }));
+      const { messages } = await fetchSmsHistory({ sinceTs: 0, limit: 10000 });
+      if (cancelRef.current) { setProgressOpen(false); return; }
+
+      const allExisting = await db.smsQueue.toArray();
+      const existingNativeIds = new Set(allExisting.map((s) => s.nativeId).filter(Boolean));
+
+      setProgress((p) => ({ ...p, stage: 'parsing', total: messages.length }));
+
+      // Build payloads in memory (fast), then bulkAdd in one transaction.
+      const toInsert = [];
+      let scanned = 0;
       for (const m of messages) {
-        if (existingIds.has(m.id)) continue;
+        scanned++;
+        if (cancelRef.current) break;
+        if (scanned % 200 === 0) {
+          setProgress((p) => ({ ...p, read: scanned, found: toInsert.length }));
+          // give the UI a tick so progress actually paints
+          await new Promise((r) => setTimeout(r, 0));
+        }
+        if (existingNativeIds.has(m.id)) continue;
         const parsed = parseSms(m.body);
-        if (!parsed.amount) continue; // skip messages we can't even pull an amount from
-        await db.smsQueue.add({
+        if (!parsed.amount) continue;
+        toInsert.push({
           rawSms: `${m.sender}: ${m.body}`,
           parsedData: parsed,
           status: 'pending',
@@ -63,15 +94,29 @@ function NativeSmsControls() {
           nativeId: m.id,
           source: 'inbox-history'
         });
-        added++;
       }
+
+      if (cancelRef.current) { setProgressOpen(false); return; }
+      setProgress((p) => ({ ...p, stage: 'saving', read: scanned, found: toInsert.length }));
+
+      let added = 0;
+      if (toInsert.length) {
+        // Chunked bulkAdd so very large batches don't lock the DB for a long time.
+        const CHUNK = 500;
+        for (let i = 0; i < toInsert.length; i += CHUNK) {
+          if (cancelRef.current) break;
+          const slice = toInsert.slice(i, i + CHUNK);
+          await db.smsQueue.bulkAdd(slice);
+          added += slice.length;
+          setProgress((p) => ({ ...p, added }));
+        }
+      }
+
       await setSetting('sms.lastImportTs', Date.now());
       setLastSync(Date.now());
-      alert(added > 0
-        ? `Imported ${added} new SMS into the inbox.`
-        : 'No new bank/UPI messages found since last import.');
+      setProgress((p) => ({ ...p, stage: 'done', added }));
     } catch (e) {
-      alert('Could not read SMS: ' + e.message);
+      setProgress((p) => ({ ...p, stage: 'error', error: e.message }));
     } finally {
       setBusy('');
     }
@@ -154,11 +199,90 @@ function NativeSmsControls() {
           Last history import: {new Date(lastSync).toLocaleString('en-IN')}
         </p>
       )}
+
+      <SmsImportProgress
+        open={progressOpen}
+        progress={progress}
+        onCancel={() => { cancelRef.current = true; }}
+        onHide={() => setProgressOpen(false)}
+        onClose={() => setProgressOpen(false)}
+      />
     </div>
   );
 }
 
-// Minimal SMS heuristic parser — works on common Indian bank/UPI SMS shapes.
+function SmsImportProgress({ open, progress, onCancel, onHide, onClose }) {
+  if (!open) return null;
+  const { stage, read, found, added, total, error } = progress;
+  const done = stage === 'done' || stage === 'error';
+  const pct = total > 0 ? Math.min(100, Math.round((read / total) * 100)) : null;
+
+  return (
+    <Modal
+      open={open}
+      onClose={done ? onClose : onHide}
+      title={
+        stage === 'done' ? 'Import complete'
+        : stage === 'error' ? 'Import failed'
+        : stage === 'reading' ? 'Reading SMS inbox…'
+        : stage === 'parsing' ? 'Scanning bank/UPI SMS…'
+        : stage === 'saving' ? 'Saving to FinSight…'
+        : 'Importing'
+      }
+      size="sm"
+      footer={
+        <>
+          {!done && (
+            <>
+              <button className="fs-btn-ghost" onClick={() => { onCancel(); }}>Cancel</button>
+              <button className="fs-btn-secondary" onClick={onHide}>
+                <EyeOff className="w-4 h-4" /> Hide (keep running)
+              </button>
+            </>
+          )}
+          {done && <button className="fs-btn-primary" onClick={onClose}>Close</button>}
+        </>
+      }
+    >
+      {stage === 'error' ? (
+        <p className="text-sm text-danger">{error}</p>
+      ) : (
+        <>
+          {pct != null && (
+            <div className="h-2 bg-muted rounded-full overflow-hidden mb-3">
+              <div
+                className="h-full bg-primary transition-all"
+                style={{ width: stage === 'saving' || stage === 'done' ? '100%' : `${pct}%` }}
+              />
+            </div>
+          )}
+          <ul className="space-y-1.5 text-sm">
+            <Row label="Messages scanned" value={read.toLocaleString('en-IN')}
+                 total={total ? total.toLocaleString('en-IN') : null} />
+            <Row label="Bank/UPI matches" value={found.toLocaleString('en-IN')} />
+            <Row label="Added to inbox" value={added.toLocaleString('en-IN')} />
+          </ul>
+          {stage !== 'done' && (
+            <p className="text-xs text-muted-fg mt-3">
+              You can close this dialog — the import keeps running in the background.
+            </p>
+          )}
+        </>
+      )}
+    </Modal>
+  );
+}
+function Row({ label, value, total }) {
+  return (
+    <li className="flex items-center justify-between">
+      <span className="text-muted-fg">{label}</span>
+      <span className="font-medium tabular-nums">{value}{total ? ` / ${total}` : ''}</span>
+    </li>
+  );
+}
+
+/* ───────── SMS parser ───────── */
+
 function parseSms(raw) {
   const text = raw || '';
   const amountMatch = text.match(/(?:Rs\.?|INR|₹)\s*([0-9,]+(?:\.\d{1,2})?)/i);
@@ -168,24 +292,40 @@ function parseSms(raw) {
   const typeCredit = /(credited|received|deposited|refund|cashback)/i.test(text);
   const txnType = typeDebit ? 'debit' : typeCredit ? 'credit' : 'debit';
 
-  // account hint like XX1234 or ending 1234
   const acctMatch = text.match(/(?:A\/c|Card|ending|XX|xx)\s*[*x]*\s*(\d{4,})/i);
   const aliasGuess = acctMatch ? `XX${acctMatch[1]}` : null;
 
-  // date is best-effort; default now
   const dateMatch = text.match(/(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})/);
   const date = dateMatch ? new Date(dateMatch[1]).getTime() : Date.now();
 
   return { amount, txnType, aliasGuess, date };
 }
 
+/* ───────── SMS Queue page ───────── */
+
+const PAGE_SIZE_OPTIONS = [25, 50, 100, 'All'];
+
 export default function SmsQueue() {
-  const queue = useLiveQuery(() => db.smsQueue.toArray(), [], []);
+  const queue = useLiveQuery(() => db.smsQueue.orderBy('dateTime').reverse().toArray(), [], []);
   const accounts = useLiveQuery(() => db.accounts.toArray(), [], []);
   const [adding, setAdding] = useState(false);
 
-  const pending = (queue ?? []).filter((s) => s.status === 'pending');
-  const processed = (queue ?? []).filter((s) => s.status === 'processed');
+  const [showDismissed, setShowDismissed] = useState(false);
+  const [pageSize, setPageSize] = useState(50);
+  const [page, setPage] = useState(1);
+
+  const pending = useMemo(() => (queue ?? []).filter((s) => s.status === 'pending'), [queue]);
+  const processed = useMemo(() => (queue ?? []).filter((s) => s.status === 'processed'), [queue]);
+  const dismissed = useMemo(() => (queue ?? []).filter((s) => s.status === 'dismissed'), [queue]);
+
+  const pendingPage = useMemo(() => {
+    if (pageSize === 'All') return pending;
+    const start = (page - 1) * pageSize;
+    return pending.slice(start, start + pageSize);
+  }, [pending, page, pageSize]);
+
+  const totalPages = pageSize === 'All' ? 1 : Math.max(1, Math.ceil(pending.length / pageSize));
+  useEffect(() => { if (page > totalPages) setPage(1); }, [totalPages, page]);
 
   return (
     <div className="space-y-3 animate-fade-in">
@@ -201,33 +341,97 @@ export default function SmsQueue() {
 
       {isNativeAndroid() && <NativeSmsControls />}
 
+      {/* Pending list */}
       <Card>
-        <div className="px-4 py-2 text-xs font-semibold text-muted-fg uppercase tracking-wider border-b border-border">
-          Pending ({pending.length})
+        <div className="px-4 py-2 flex items-center justify-between gap-2 border-b border-border">
+          <div className="text-xs font-semibold text-muted-fg uppercase tracking-wider">
+            Pending ({pending.length.toLocaleString('en-IN')})
+          </div>
+          {pending.length > 0 && (
+            <div className="flex items-center gap-2 text-xs">
+              <label className="text-muted-fg">per page</label>
+              <select
+                className="fs-input py-1 px-2 text-xs w-auto"
+                value={pageSize}
+                onChange={(e) => {
+                  const v = e.target.value === 'All' ? 'All' : Number(e.target.value);
+                  setPageSize(v);
+                  setPage(1);
+                }}
+              >
+                {PAGE_SIZE_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
+            </div>
+          )}
         </div>
         {pending.length === 0 ? (
           <EmptyState
             icon={Inbox}
             title="Inbox is empty"
-            hint="Paste a bank/UPI SMS to auto-parse fields. Background SMS sync arrives on Android in a later release."
+            hint={isNativeAndroid()
+              ? 'Tap "Import past SMS" above to scan your phone\'s inbox for bank/UPI messages.'
+              : 'Paste a bank/UPI SMS to auto-parse fields, or install the Android APK for automatic SMS sync.'}
             action={<button className="fs-btn-primary" onClick={() => setAdding(true)}>Paste SMS</button>}
           />
         ) : (
-          <ul className="divide-y divide-border">
-            {pending.map((sms) => <SmsRow key={sms.id} sms={sms} accounts={accounts} />)}
-          </ul>
+          <>
+            <ul className="divide-y divide-border">
+              {pendingPage.map((sms) => <SmsRow key={sms.id} sms={sms} accounts={accounts} />)}
+            </ul>
+            {pageSize !== 'All' && totalPages > 1 && (
+              <Pager page={page} totalPages={totalPages} onChange={setPage}
+                     visible={pendingPage.length} total={pending.length} />
+            )}
+          </>
         )}
       </Card>
 
+      {/* Dismissed list (collapsed by default) */}
+      {dismissed.length > 0 && (
+        <Card>
+          <button
+            onClick={() => setShowDismissed((v) => !v)}
+            className="w-full px-4 py-2 flex items-center justify-between text-xs font-semibold text-muted-fg uppercase tracking-wider border-b border-border hover:bg-muted/40"
+          >
+            <span>Dismissed ({dismissed.length})</span>
+            <span className="normal-case text-[11px] text-primary">{showDismissed ? 'Hide' : 'Show'}</span>
+          </button>
+          {showDismissed && (
+            <ul className="divide-y divide-border">
+              {dismissed.slice(0, 100).map((sms) => (
+                <li key={sms.id} className="p-3 text-sm flex items-center gap-2">
+                  <span className="truncate text-muted-fg flex-1">{sms.rawSms.slice(0, 80)}…</span>
+                  <button
+                    className="fs-btn-ghost text-xs"
+                    title="Restore to pending"
+                    onClick={() => db.smsQueue.update(sms.id, { status: 'pending' })}
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" /> Restore
+                  </button>
+                  <button
+                    className="text-xs text-danger"
+                    title="Delete permanently"
+                    onClick={() => db.smsQueue.delete(sms.id)}
+                  >
+                    Delete
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
+      )}
+
+      {/* Processed list */}
       {processed.length > 0 && (
         <Card>
           <div className="px-4 py-2 text-xs font-semibold text-muted-fg uppercase tracking-wider border-b border-border">
             Processed ({processed.length})
           </div>
           <ul className="divide-y divide-border">
-            {processed.slice(0, 20).map((sms) => (
+            {processed.slice(0, 30).map((sms) => (
               <li key={sms.id} className="p-3 text-sm flex items-center justify-between">
-                <span className="truncate text-muted-fg">{sms.rawSms.slice(0, 60)}…</span>
+                <span className="truncate text-muted-fg">{sms.rawSms.slice(0, 70)}…</span>
                 <button
                   className="text-xs text-danger ml-2"
                   onClick={() => db.smsQueue.delete(sms.id)}
@@ -241,6 +445,33 @@ export default function SmsQueue() {
       )}
 
       <AddSmsModal open={adding} onClose={() => setAdding(false)} />
+    </div>
+  );
+}
+
+function Pager({ page, totalPages, onChange, visible, total }) {
+  return (
+    <div className="px-3 py-2 flex items-center justify-between gap-2 text-xs">
+      <span className="text-muted-fg">
+        Showing {((page - 1) * (total / totalPages) | 0) + 1}–{((page - 1) * (total / totalPages) | 0) + visible} of {total.toLocaleString('en-IN')}
+      </span>
+      <div className="flex items-center gap-1">
+        <button
+          className="fs-btn-ghost px-2 py-1 disabled:opacity-50"
+          disabled={page <= 1}
+          onClick={() => onChange(page - 1)}
+        >
+          <ChevronLeft className="w-4 h-4" />
+        </button>
+        <span className="px-2">{page} / {totalPages}</span>
+        <button
+          className="fs-btn-ghost px-2 py-1 disabled:opacity-50"
+          disabled={page >= totalPages}
+          onClick={() => onChange(page + 1)}
+        >
+          <ChevronRight className="w-4 h-4" />
+        </button>
+      </div>
     </div>
   );
 }
@@ -293,6 +524,10 @@ function SmsRow({ sms, accounts }) {
     (a.aliases ?? []).some((al) => aliasMatchesAccountNumber(al, sms.parsedData?.aliasGuess ?? '')) ||
     (sms.parsedData?.aliasGuess && a.number && String(a.number).endsWith(sms.parsedData.aliasGuess.replace(/[X*]/g, '')))
   );
+  // X button = soft dismiss (preserves nativeId so re-import won't bring it back)
+  const dismiss = async () => {
+    await db.smsQueue.update(sms.id, { status: 'dismissed' });
+  };
   return (
     <li className="p-3">
       <div className="flex items-start gap-3">
@@ -311,7 +546,7 @@ function SmsRow({ sms, accounts }) {
             {matched && <span className="fs-chip text-primary">→ {matched.name}</span>}
           </div>
         </div>
-        <button onClick={() => db.smsQueue.delete(sms.id)} className="text-muted-fg hover:text-danger" aria-label="Discard">
+        <button onClick={dismiss} className="text-muted-fg hover:text-danger" aria-label="Dismiss" title="Dismiss — won't reimport">
           <X className="w-4 h-4" />
         </button>
       </div>
@@ -338,6 +573,15 @@ function SmsConvertModal({ open, onClose, sms, matched }) {
     description: '',
     tags: ''
   });
+
+  useEffect(() => {
+    if (!open) return;
+    setForm((f) => ({
+      ...f,
+      accountId: matched?.id ?? f.accountId,
+      profileId: profiles[0]?.id ?? f.profileId
+    }));
+  }, [open, matched, profiles]);
 
   const categorySuggestions = Array.from(new Set([
     ...categories.filter((c) => c.parentId == null).map((c) => c.name),
@@ -369,23 +613,32 @@ function SmsConvertModal({ open, onClose, sms, matched }) {
         }
       }
       const tags = form.tags.split(',').map((s) => s.trim()).filter(Boolean);
+      const txnDateTime = sms.dateTime ?? sms.parsedData?.date ?? Date.now();
+      const txnType = sms.parsedData?.txnType ?? 'debit';
+      const selectedAccount = accounts.find((a) => a.id === Number(form.accountId));
       const txnId = await db.transactions.add({
         slNo: 0,
-        dateTime: sms.parsedData?.date ?? Date.now(),
+        dateTime: txnDateTime,
         profileId: Number(form.profileId),
         accountId: Number(form.accountId),
         categoryId: cat.id,
         subCategoryId: sub?.id ?? null,
         amount: amt,
-        txnType: sms.parsedData?.txnType ?? 'debit',
-        paymentMode: accounts.find((a) => a.id === Number(form.accountId))?.type ?? 'bank',
+        txnType,
+        paymentMode: selectedAccount?.type ?? 'bank',
         description: form.description ?? '',
         tags,
         source: 'sms'
       });
       await reindexSlNo();
+      if (selectedAccount) {
+        const delta = (txnType === 'credit' ? 1 : -1) * amt;
+        await db.accounts.update(selectedAccount.id, {
+          balance: Number(selectedAccount.balance ?? 0) + delta
+        });
+      }
       await db.smsQueue.update(sms.id, { status: 'processed', linkedTxnId: txnId });
-      success('Transaction created');
+      success('Transaction created — view it in the Transactions tab');
       onClose?.();
     } catch (e) {
       error(e.message);

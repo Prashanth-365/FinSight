@@ -40,6 +40,7 @@ jobs:
       - name: Build web app
         env:
           VITE_GOOGLE_CLIENT_ID: ${{ secrets.VITE_GOOGLE_CLIENT_ID }}
+          VITE_OAUTH_REDIRECT_URL: ${{ secrets.VITE_OAUTH_REDIRECT_URL }}
         run: npm run build
 
       - name: Generate Capacitor Android project

@@ -9,7 +9,8 @@ import { useProfile } from '@/context/ProfileContext.jsx';
 import { useToast } from '@/components/ui/Toast.jsx';
 import { freqSorted, todayLocalISO, maskNumber } from '@/lib/utils.js';
 import { formatINR } from '@/lib/currency.js';
-import { ArrowDownLeft, ArrowUpRight } from 'lucide-react';
+import { ArrowDownLeft, ArrowUpRight, Users } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { cn } from '@/lib/utils.js';
 
 const empty = (profileId) => ({
@@ -152,6 +153,32 @@ export function TransactionSheet({ open, onClose, editing = null, initial = null
 
   const profileOptions = profiles.map((p) => ({ value: p.id, label: p.name }));
   const accountOptions = (accounts ?? []).filter((a) => a.isActive !== 0);
+  const noProfiles = profiles.length === 0;
+
+  if (open && noProfiles) {
+    return (
+      <Sheet open={open} onClose={onClose} title="Add a profile first">
+        <div className="text-center py-6 space-y-3">
+          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-primary/15 text-primary">
+            <Users className="w-7 h-7" />
+          </div>
+          <div>
+            <h3 className="font-semibold">No profiles yet</h3>
+            <p className="text-sm text-muted-fg mt-1 max-w-xs mx-auto">
+              FinSight tracks money per profile (you, family members). Add at least one profile to start logging transactions.
+            </p>
+          </div>
+          <Link
+            to="/settings/profiles"
+            onClick={onClose}
+            className="fs-btn-primary inline-flex"
+          >
+            Set up first profile
+          </Link>
+        </div>
+      </Sheet>
+    );
+  }
 
   return (
     <Sheet

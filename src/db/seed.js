@@ -16,16 +16,8 @@ const DEFAULT_CATEGORIES = [
 ];
 
 export async function seedIfEmpty() {
-  const profileCount = await db.profiles.count();
-  if (profileCount === 0) {
-    await db.profiles.add({
-      name: 'Master',
-      avatar: '👑',
-      color: '#22d3ee',
-      isDefault: 1,
-      createdAt: Date.now()
-    });
-  }
+  // No default profile — the "All profiles" master view is synthetic in the UI.
+  // Users add their own profile(s) from Settings → Profiles, or when first prompted.
   const catCount = await db.categories.count();
   if (catCount === 0) {
     for (const c of DEFAULT_CATEGORIES) {

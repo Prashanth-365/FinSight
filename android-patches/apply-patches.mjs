@@ -43,7 +43,7 @@ const kotlinSrc = fs.readFileSync(path.join(__dirname, 'SmsReaderPlugin.kt'), 'u
 fs.writeFileSync(path.join(PACKAGE_PATH, 'SmsReaderPlugin.kt'), kotlinSrc);
 log('Wrote SmsReaderPlugin.kt');
 
-// 3. AndroidManifest.xml — add SMS permissions
+// 3. AndroidManifest.xml — add SMS permissions + OAuth deep-link intent-filter
 let manifest = fs.readFileSync(MANIFEST, 'utf8');
 const permsToAdd = [
   '<uses-permission android:name="android.permission.READ_SMS" />',
@@ -59,11 +59,29 @@ for (const p of permsToAdd) {
     changed = true;
   }
 }
+
+// OAuth deep-link: handles com.finsight.app://oauth-success
+const oauthFilter = `
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="com.finsight.app" android:host="oauth-success" />
+            </intent-filter>`;
+if (!manifest.includes('com.finsight.app') || !manifest.includes('oauth-success')) {
+  // Insert inside the MainActivity <activity> block, after the existing intent-filter
+  manifest = manifest.replace(
+    /(<activity[^>]*android:name="\.MainActivity"[\s\S]*?)(<\/activity>)/,
+    (m, head, tail) => head + oauthFilter + '\n        ' + tail
+  );
+  changed = true;
+}
+
 if (changed) {
   fs.writeFileSync(MANIFEST, manifest);
-  log('Added SMS permissions to AndroidManifest.xml');
+  log('Updated AndroidManifest.xml (permissions + OAuth deep link)');
 } else {
-  log('AndroidManifest.xml already has SMS permissions');
+  log('AndroidManifest.xml already up to date');
 }
 
 // 4. Project-level build.gradle — add Kotlin plugin classpath if missing
