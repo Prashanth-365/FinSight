@@ -4,7 +4,7 @@ import {
   Inbox, Plus, Wand2, X, Smartphone, Download, Radio, ChevronLeft, ChevronRight,
   EyeOff, RotateCcw
 } from 'lucide-react';
-import { db, reindexSlNo, getSetting, setSetting } from '@/db/database.js';
+import { db, getSetting, setSetting } from '@/db/database.js';
 import {
   isNativeAndroid, ensureSmsPermission, checkSmsPermission, fetchSmsHistory, startSmsListener
 } from '@/lib/smsNative.js';
@@ -398,6 +398,9 @@ export default function SmsQueue() {
   const [pageSize, setPageSize] = useState(50);
   const [page, setPage] = useState(1);
 
+  // One hoisted "convert this SMS" id so prev/next navigation lives in one place.
+  const [convertingSmsId, setConvertingSmsId] = useState(null);
+
   const pending = useMemo(() => (queue ?? []).filter((s) => s.status === 'pending'), [queue]);
   const processed = useMemo(() => (queue ?? []).filter((s) => s.status === 'processed'), [queue]);
   const dismissed = useMemo(() => (queue ?? []).filter((s) => s.status === 'dismissed'), [queue]);
@@ -460,7 +463,14 @@ export default function SmsQueue() {
         ) : (
           <>
             <ul className="divide-y divide-border">
-              {pendingPage.map((sms) => <SmsRow key={sms.id} sms={sms} accounts={accounts} />)}
+              {pendingPage.map((sms) => (
+                <SmsRow
+                  key={sms.id}
+                  sms={sms}
+                  accounts={accounts}
+                  onConvert={(id) => setConvertingSmsId(id)}
+                />
+              ))}
             </ul>
             {pageSize !== 'All' && totalPages > 1 && (
               <Pager page={page} totalPages={totalPages} onChange={setPage}
@@ -529,6 +539,14 @@ export default function SmsQueue() {
       )}
 
       <AddSmsModal open={adding} onClose={() => setAdding(false)} />
+
+      <SmsConverterSheet
+        smsId={convertingSmsId}
+        pending={pending}
+        accounts={accounts}
+        onClose={() => setConvertingSmsId(null)}
+        onChange={setConvertingSmsId}
+      />
     </div>
   );
 }
@@ -657,34 +675,90 @@ function AddSmsModal({ open, onClose }) {
   );
 }
 
-function SmsRow({ sms, accounts }) {
-  const [open, setOpen] = useState(false);
-  const matched = accounts.find((a) =>
+function matchAccountForSms(sms, accounts) {
+  return accounts.find((a) =>
     (a.aliases ?? []).some((al) => aliasMatchesAccountNumber(al, sms.parsedData?.aliasGuess ?? '')) ||
     (sms.parsedData?.aliasGuess && a.number && String(a.number).endsWith(sms.parsedData.aliasGuess.replace(/[X*]/g, '')))
   );
+}
+
+function buildInitialFromSms(sms, matched) {
+  const ts = sms.dateTime ?? sms.parsedData?.date ?? Date.now();
+  const d = new Date(ts);
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return {
+    dateTime: d.toISOString().slice(0, 16),
+    accountId: matched?.id ?? '',
+    amount: sms.parsedData?.amount ? String(sms.parsedData.amount) : '',
+    txnType: sms.parsedData?.txnType ?? 'debit',
+    description: '',
+    tags: ''
+  };
+}
+
+/**
+ * One TransactionSheet for the whole SMS Queue page; navigates between pending
+ * SMS via prev/next/dismiss icons and "Save & next".
+ *
+ *   smsId    — id of the SMS currently being converted (null hides the sheet)
+ *   pending  — full pending list (newest-first), used to compute prev/next
+ *   onChange — called with a new id when nav buttons move us along
+ *   onClose  — closes the sheet entirely
+ */
+function SmsConverterSheet({ smsId, pending, accounts, onClose, onChange }) {
+  const idx = useMemo(
+    () => (smsId == null ? -1 : pending.findIndex((s) => s.id === smsId)),
+    [smsId, pending]
+  );
+  const current = idx >= 0 ? pending[idx] : null;
+  const matched = current ? matchAccountForSms(current, accounts) : null;
+  const initial = useMemo(
+    () => (current ? buildInitialFromSms(current, matched) : null),
+    [current, matched]
+  );
+
+  // After current SMS is processed/dismissed and disappears from `pending`,
+  // pick the row that was right after it (now at the same idx), else the
+  // previous one, else close.
+  const advance = () => {
+    const remaining = pending.filter((s) => s.id !== smsId);
+    if (remaining.length === 0) { onClose?.(); return; }
+    const nextSms = remaining[idx] ?? remaining[idx - 1] ?? remaining[0];
+    onChange?.(nextSms.id);
+  };
+
+  if (!current) return null;
+
+  const hasPrev = idx > 0;
+  const hasNext = idx < pending.length - 1;
+
+  return (
+    <TransactionSheet
+      // Force form reset when switching to a different SMS
+      key={current.id}
+      open={!!current}
+      onClose={onClose}
+      initial={initial}
+      smsLink={current.id}
+      smsText={current.rawSms}
+      smsIndex={idx + 1}
+      smsTotal={pending.length}
+      onPrev={hasPrev ? () => onChange?.(pending[idx - 1].id) : null}
+      onNext={hasNext ? () => onChange?.(pending[idx + 1].id) : null}
+      onDismiss={async () => {
+        await db.smsQueue.update(current.id, { status: 'dismissed' });
+        advance();
+      }}
+      onSavedAndNext={advance}
+    />
+  );
+}
+
+function SmsRow({ sms, accounts, onConvert }) {
+  const matched = matchAccountForSms(sms, accounts);
   const dismiss = async () => {
     await db.smsQueue.update(sms.id, { status: 'dismissed' });
   };
-
-  // Build the "initial" payload that prefills the main TransactionSheet
-  const initial = useMemo(() => {
-    const ts = sms.dateTime ?? sms.parsedData?.date ?? Date.now();
-    const localIso = (() => {
-      const d = new Date(ts);
-      d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
-      return d.toISOString().slice(0, 16);
-    })();
-    return {
-      dateTime: localIso,
-      accountId: matched?.id ?? '',
-      amount: sms.parsedData?.amount ? String(sms.parsedData.amount) : '',
-      txnType: sms.parsedData?.txnType ?? 'debit',
-      description: sms.rawSms?.slice(0, 140) ?? '',
-      tags: ''
-    };
-  }, [sms, matched]);
-
   return (
     <li className="p-3">
       <div className="flex items-start gap-3">
@@ -708,14 +782,8 @@ function SmsRow({ sms, accounts }) {
         </button>
       </div>
       <div className="mt-2 flex justify-end gap-2">
-        <button className="fs-btn-primary text-xs px-3 py-1.5" onClick={() => setOpen(true)}>Convert to transaction</button>
+        <button className="fs-btn-primary text-xs px-3 py-1.5" onClick={() => onConvert(sms.id)}>Convert to transaction</button>
       </div>
-      <TransactionSheet
-        open={open}
-        onClose={() => setOpen(false)}
-        initial={initial}
-        smsLink={sms.id}
-      />
     </li>
   );
 }

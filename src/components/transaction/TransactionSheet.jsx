@@ -9,7 +9,7 @@ import { useProfile } from '@/context/ProfileContext.jsx';
 import { useToast } from '@/components/ui/Toast.jsx';
 import { freqSorted, todayLocalISO, maskNumber, applyTxnDeltaToBalances, getAccountBalance, inferInvestmentPlatform } from '@/lib/utils.js';
 import { formatINR } from '@/lib/currency.js';
-import { ArrowDownLeft, ArrowUpRight, Users } from 'lucide-react';
+import { ArrowDownLeft, ArrowUpRight, Users, ChevronLeft, ChevronRight, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { cn } from '@/lib/utils.js';
 
@@ -27,7 +27,21 @@ const empty = (profileId) => ({
   investmentName: '' // used only when category resolves to type='investment'
 });
 
-export function TransactionSheet({ open, onClose, editing = null, initial = null, smsLink = null }) {
+export function TransactionSheet({
+  open,
+  onClose,
+  editing = null,
+  initial = null,
+  smsLink = null,
+  // SMS-conversion navigation (all optional, only used when smsLink is set)
+  smsText = '',
+  smsIndex = null,    // 1-based position in pending list
+  smsTotal = null,    // total count
+  onPrev = null,      // called when "previous" arrow tapped
+  onNext = null,      // called when "next" arrow tapped
+  onDismiss = null,   // called when trash icon tapped
+  onSavedAndNext = null // called after save & add another, when smsLink is set
+}) {
   const { profiles, activeProfileId } = useProfile();
   const { success, error } = useToast();
 
@@ -250,9 +264,15 @@ export function TransactionSheet({ open, onClose, editing = null, initial = null
       success(form.id ? 'Transaction updated' : 'Transaction added');
 
       if (mode === 'continue' && !form.id) {
-        // Keep the sheet open. Reset only amount + description so you can quickly
-        // add the next one with the same profile/account/category preserved.
-        setForm((f) => ({ ...f, amount: '', description: '' }));
+        if (smsLink && onSavedAndNext) {
+          // Convert-SMS mode: advance to the next pending SMS. The parent will
+          // change the `smsLink` / `initial` props which triggers a form reset
+          // (we use a `key` prop on the sheet to force this).
+          onSavedAndNext();
+        } else {
+          // Plain "add another" mode: keep form, clear only amount + description.
+          setForm((f) => ({ ...f, amount: '', description: '' }));
+        }
       } else {
         onClose?.();
       }
@@ -302,9 +322,11 @@ export function TransactionSheet({ open, onClose, editing = null, initial = null
             <button
               className="fs-btn-secondary"
               onClick={() => save('continue')}
-              title="Save and keep the sheet open with everything but amount preserved"
+              title={smsLink
+                ? 'Save and move to the next pending SMS'
+                : 'Save and keep the sheet open with everything but amount preserved'}
             >
-              Save &amp; add another
+              {smsLink ? 'Save & next' : 'Save & add another'}
             </button>
           )}
           <button className="fs-btn-primary" onClick={() => save('close')}>
@@ -313,6 +335,58 @@ export function TransactionSheet({ open, onClose, editing = null, initial = null
         </>
       }
     >
+      {smsLink && (smsText || onPrev || onNext || onDismiss) && (
+        <div className="mb-4 rounded-xl border border-border bg-elevated p-3">
+          {smsText && (
+            <p className="text-xs leading-snug whitespace-pre-wrap break-words text-foreground/90">
+              {smsText}
+            </p>
+          )}
+          {(onPrev || onNext || onDismiss || smsTotal != null) && (
+            <div className="mt-2 pt-2 border-t border-border flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={onPrev}
+                  disabled={!onPrev}
+                  className="p-1.5 rounded-lg hover:bg-muted disabled:opacity-30"
+                  title="Previous SMS (more recent)"
+                  aria-label="Previous SMS"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+                {smsIndex != null && smsTotal != null && (
+                  <span className="text-[11px] text-muted-fg tabular-nums px-1">
+                    {smsIndex} / {smsTotal}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={onNext}
+                  disabled={!onNext}
+                  className="p-1.5 rounded-lg hover:bg-muted disabled:opacity-30"
+                  title="Next SMS (older)"
+                  aria-label="Next SMS"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
+              {onDismiss && (
+                <button
+                  type="button"
+                  onClick={onDismiss}
+                  className="p-1.5 rounded-lg hover:bg-muted text-muted-fg hover:text-danger"
+                  title="Dismiss this SMS (won't be reimported)"
+                  aria-label="Dismiss SMS"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       <Field label="Type">
         <div className="grid grid-cols-2 gap-2">
           <TypeToggle
