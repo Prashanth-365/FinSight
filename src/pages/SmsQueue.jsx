@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import {
   Inbox, Plus, Wand2, X, Smartphone, Download, Radio, ChevronLeft, ChevronRight,
@@ -6,14 +7,16 @@ import {
 } from 'lucide-react';
 import { db, getSetting, setSetting } from '@/db/database.js';
 import {
-  isNativeAndroid, ensureSmsPermission, checkSmsPermission, fetchSmsHistory, startSmsListener
+  isNativeAndroid, ensureSmsPermission, ensureNotificationPermission, checkSmsPermission,
+  fetchSmsHistory, startSmsListener
 } from '@/lib/smsNative.js';
+import { App as CapApp } from '@capacitor/app';
 import { Card } from '@/components/ui/Card.jsx';
 import { EmptyState } from '@/components/ui/Empty.jsx';
 import { Modal } from '@/components/ui/Modal.jsx';
 import { useToast } from '@/components/ui/Toast.jsx';
 import { TransactionSheet } from '@/components/transaction/TransactionSheet.jsx';
-import { aliasMatchesAccountNumber, fmtDateTime, todayLocalISO, cn } from '@/lib/utils.js';
+import { aliasMatchesAccountNumber, fmtDateTime, todayLocalISO, tsToLocalISO, cn } from '@/lib/utils.js';
 import { formatINR } from '@/lib/currency.js';
 
 /* ───────── Native SMS controls ───────── */
@@ -124,7 +127,11 @@ function NativeSmsControls() {
     setBusy('listen');
     const ok = await ensureSmsPermission();
     if (!ok) { setPermission('denied'); setBusy(''); return; }
+    await ensureNotificationPermission(); // best-effort; OK if denied (no banner)
     const stop = await startSmsListener(async (m) => {
+      // This callback is only invoked when the WebView is alive. The Foreground
+      // Service still runs (and posts a notification) when the app is killed —
+      // the notification deep-links into the app, which then ingests the SMS.
       const parsed = parseSms(m.body);
       if (!parsed.amount || !parsed.txnType) return;
       await db.smsQueue.add({
@@ -214,19 +221,19 @@ function SmsImportProgress({ open, progress, onCancel, onHide, onClose }) {
   const { stage, read, found, added, total, error } = progress;
   const done = stage === 'done' || stage === 'error';
   const pct = total > 0 ? Math.min(100, Math.round((read / total) * 100)) : null;
+  const TITLES = {
+    done: 'Import complete',
+    error: 'Import failed',
+    reading: 'Reading SMS inbox…',
+    parsing: 'Scanning bank/UPI SMS…',
+    saving: 'Saving to FinSight…'
+  };
 
   return (
     <Modal
       open={open}
       onClose={done ? onClose : onHide}
-      title={
-        stage === 'done' ? 'Import complete'
-        : stage === 'error' ? 'Import failed'
-        : stage === 'reading' ? 'Reading SMS inbox…'
-        : stage === 'parsing' ? 'Scanning bank/UPI SMS…'
-        : stage === 'saving' ? 'Saving to FinSight…'
-        : 'Importing'
-      }
+      title={TITLES[stage] ?? 'Importing'}
       size="sm"
       footer={
         <>
@@ -401,6 +408,43 @@ export default function SmsQueue() {
   // One hoisted "convert this SMS" id so prev/next navigation lives in one place.
   const [convertingSmsId, setConvertingSmsId] = useState(null);
 
+  // Handle deep-link arrivals from the Android notification tap.
+  useEffect(() => {
+    if (!isNativeAndroid()) return;
+    let handle;
+    (async () => {
+      handle = await CapApp.addListener('appUrlOpen', async ({ url }) => {
+        if (!url?.startsWith('com.finsight.app://sms-incoming')) return;
+        try {
+          const u = new URL(url);
+          const sender = u.searchParams.get('sender') ?? '';
+          const body = u.searchParams.get('body') ?? '';
+          const ts = Number(u.searchParams.get('ts')) || Date.now();
+          if (!body) return;
+          const parsed = parseSms(body);
+          if (!parsed.amount || !parsed.txnType) return;
+          // Avoid duplicates: same sender + body + minute-resolution timestamp
+          const tsMinute = Math.floor(ts / 60000) * 60000;
+          const dupe = (await db.smsQueue.toArray()).find(
+            (s) => s.rawSms === `${sender}: ${body}` &&
+                   Math.floor((s.dateTime ?? 0) / 60000) * 60000 === tsMinute
+          );
+          const id = dupe?.id ?? await db.smsQueue.add({
+            rawSms: `${sender}: ${body}`,
+            parsedData: { ...parsed, date: ts },
+            status: 'pending',
+            dateTime: ts,
+            linkedTxnId: null,
+            nativeId: null,
+            source: 'inbox-live'
+          });
+          setConvertingSmsId(id);
+        } catch (e) { /* ignore malformed urls */ }
+      });
+    })();
+    return () => { handle?.remove?.(); };
+  }, []);
+
   const pending = useMemo(() => (queue ?? []).filter((s) => s.status === 'pending'), [queue]);
   const processed = useMemo(() => (queue ?? []).filter((s) => s.status === 'processed'), [queue]);
   const dismissed = useMemo(() => (queue ?? []).filter((s) => s.status === 'dismissed'), [queue]);
@@ -419,7 +463,10 @@ export default function SmsQueue() {
       <div className="flex items-start justify-between gap-2 flex-wrap">
         <div>
           <h1 className="text-lg font-semibold">SMS inbox</h1>
-          <p className="text-xs text-muted-fg">Review parsed SMS and convert into transactions.</p>
+          <p className="text-xs text-muted-fg">
+            Review parsed SMS and convert into transactions. Missed a few? Catch them via{' '}
+            <Link to="/statements" className="text-primary">Statement import</Link>.
+          </p>
         </div>
         <button className="fs-btn-secondary" onClick={() => setAdding(true)}>
           <Plus className="w-4 h-4" /> Paste SMS
@@ -474,7 +521,7 @@ export default function SmsQueue() {
             </ul>
             {pageSize !== 'All' && totalPages > 1 && (
               <Pager page={page} totalPages={totalPages} onChange={setPage}
-                     visible={pendingPage.length} total={pending.length} />
+                     pageSize={pageSize} visible={pendingPage.length} total={pending.length} />
             )}
           </>
         )}
@@ -551,11 +598,12 @@ export default function SmsQueue() {
   );
 }
 
-function Pager({ page, totalPages, onChange, visible, total }) {
+function Pager({ page, totalPages, onChange, pageSize, visible, total }) {
+  const start = (page - 1) * pageSize;
   return (
     <div className="px-3 py-2 flex items-center justify-between gap-2 text-xs">
       <span className="text-muted-fg">
-        Showing {((page - 1) * (total / totalPages) | 0) + 1}–{((page - 1) * (total / totalPages) | 0) + visible} of {total.toLocaleString('en-IN')}
+        Showing {start + 1}–{start + visible} of {total.toLocaleString('en-IN')}
       </span>
       <div className="flex items-center gap-1">
         <button
@@ -597,11 +645,7 @@ function AddSmsModal({ open, onClose }) {
 
   useEffect(() => {
     if (!autoDate) return;
-    if (preview?.date) {
-      const d = new Date(preview.date);
-      d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
-      setDateTime(d.toISOString().slice(0, 16));
-    }
+    if (preview?.date) setDateTime(tsToLocalISO(preview.date));
   }, [preview?.date, autoDate]);
 
   const submit = async () => {
@@ -684,10 +728,8 @@ function matchAccountForSms(sms, accounts) {
 
 function buildInitialFromSms(sms, matched) {
   const ts = sms.dateTime ?? sms.parsedData?.date ?? Date.now();
-  const d = new Date(ts);
-  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
   return {
-    dateTime: d.toISOString().slice(0, 16),
+    dateTime: tsToLocalISO(ts),
     accountId: matched?.id ?? '',
     amount: sms.parsedData?.amount ? String(sms.parsedData.amount) : '',
     txnType: sms.parsedData?.txnType ?? 'debit',

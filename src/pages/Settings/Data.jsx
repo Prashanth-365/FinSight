@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Download, Upload, Cloud, CloudOff, Trash2, ShieldCheck, ShieldAlert, RefreshCw, Eye, EyeOff, LogIn } from 'lucide-react';
-import { db, reindexSlNo, getSetting, setSetting } from '@/db/database.js';
+import { db, getSetting, setSetting } from '@/db/database.js';
 import { Card } from '@/components/ui/Card.jsx';
 import { Field } from '@/components/ui/Input.jsx';
 import { Modal, ConfirmDialog } from '@/components/ui/Modal.jsx';
@@ -8,29 +8,8 @@ import { useToast } from '@/components/ui/Toast.jsx';
 import { SectionHeader } from './Profiles.jsx';
 import { passphraseScore } from '@/lib/crypto.js';
 import { isSignedIn, signInWithGoogle, getEffectiveClientId } from '@/lib/googleAuth.js';
-import { pushBackup, pullBackup, remoteStatus } from '@/lib/backup.js';
+import { pushBackup, pullBackup, remoteStatus, TABLES, dumpAll, restoreAll } from '@/lib/backup.js';
 import { fmtDateTime, cn } from '@/lib/utils.js';
-
-const TABLES = ['users', 'profiles', 'accounts', 'categories', 'transactions', 'investments', 'chitFunds', 'smsQueue', 'settings'];
-
-async function dumpAll() {
-  const out = {};
-  for (const t of TABLES) out[t] = await db.table(t).toArray();
-  return { version: 1, exportedAt: Date.now(), data: out };
-}
-
-async function restoreAll(payload) {
-  if (!payload?.data) throw new Error('Invalid export file');
-  await db.transaction('rw', TABLES.map((t) => db.table(t)), async () => {
-    for (const t of TABLES) {
-      await db.table(t).clear();
-      if (Array.isArray(payload.data[t]) && payload.data[t].length > 0) {
-        await db.table(t).bulkAdd(payload.data[t]);
-      }
-    }
-  });
-  await reindexSlNo();
-}
 
 export default function Data() {
   const { success, error, info } = useToast();

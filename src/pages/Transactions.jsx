@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { db, reindexSlNo } from '@/db/database.js';
+import { db } from '@/db/database.js';
+import { deleteTransaction, deleteTransactions } from '@/db/txnEffects.js';
 import { useProfile } from '@/context/ProfileContext.jsx';
 import { Card } from '@/components/ui/Card.jsx';
 import { Select } from '@/components/ui/Select.jsx';
@@ -15,7 +16,7 @@ import {
   Filter, Trash2, Edit3, ListOrdered, X, MousePointer2, CheckSquare, Square
 } from 'lucide-react';
 import { formatINR } from '@/lib/currency.js';
-import { fmtDate, fmtDateTime, cn, maskNumber, applyTxnDeltaToBalances, freqSorted } from '@/lib/utils.js';
+import { fmtDate, fmtDateTime, cn, maskNumber, freqSorted } from '@/lib/utils.js';
 
 const LONG_PRESS_MS = 450;
 
@@ -40,6 +41,11 @@ export default function Transactions() {
   const [selected, setSelected] = useState(new Set());
   const [bulkEditOpen, setBulkEditOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+
+  // Infinite scroll: render in batches as user scrolls toward the bottom
+  const PAGE_SIZE = 50;
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const sentinelRef = useRef(null);
 
   const filtered = useMemo(() => {
     let out = txns;
@@ -68,6 +74,26 @@ export default function Transactions() {
     return { cr, dr, net: cr - dr };
   }, [filtered]);
 
+  // Reset the visible window whenever filters/inputs change so we don't start
+  // at the bottom of an old list.
+  useEffect(() => { setVisibleCount(PAGE_SIZE); }, [filters, isMasterView, activeProfileId]);
+
+  const visible = useMemo(() => filtered.slice(0, visibleCount), [filtered, visibleCount]);
+
+  // IntersectionObserver: when the sentinel scrolls into view, append more rows.
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    if (visibleCount >= filtered.length) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting) {
+        setVisibleCount((n) => Math.min(filtered.length, n + PAGE_SIZE));
+      }
+    }, { rootMargin: '300px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [filtered.length, visibleCount]);
+
   const toggleSel = (id) => setSelected((s) => {
     const n = new Set(s);
     if (n.has(id)) n.delete(id); else n.add(id);
@@ -81,31 +107,7 @@ export default function Transactions() {
 
   const deleteSelected = async () => {
     const ids = [...selected];
-    const all = await db.transactions.bulkGet(ids);
-    const accountsMap = new Map((await db.accounts.toArray()).map((a) => [a.id, a]));
-    for (const t of all) {
-      if (!t) continue;
-      // Reverse balance delta
-      const acc = accountsMap.get(t.accountId);
-      if (acc) {
-        const reverse = (t.txnType === 'credit' ? -1 : 1) * Number(t.amount ?? 0);
-        const balances = applyTxnDeltaToBalances(acc, t.profileId, reverse);
-        await db.accounts.update(acc.id, { balances, balance: null });
-        accountsMap.set(acc.id, { ...acc, balances });
-      }
-      // Reverse invested-amount delta if linked to an investment
-      if (t.investmentId) {
-        const inv = await db.investments.get(t.investmentId);
-        if (inv) {
-          const invReverse = (t.txnType === 'credit' ? 1 : -1) * Number(t.amount ?? 0);
-          await db.investments.update(inv.id, {
-            investedAmount: Math.max(0, Number(inv.investedAmount ?? 0) + invReverse)
-          });
-        }
-      }
-    }
-    await db.transactions.bulkDelete(ids);
-    await reindexSlNo();
+    await deleteTransactions(ids);
     success(`Deleted ${ids.length} transaction${ids.length > 1 ? 's' : ''}`);
     exitSelection();
   };
@@ -199,7 +201,7 @@ export default function Transactions() {
       ) : (
         <Card>
           <ul className="divide-y divide-border">
-            {filtered.map((t) => (
+            {visible.map((t) => (
               <TxnRow
                 key={t.id}
                 txn={t}
@@ -216,6 +218,16 @@ export default function Transactions() {
               />
             ))}
           </ul>
+          {visibleCount < filtered.length && (
+            <div ref={sentinelRef} className="p-3 text-center text-xs text-muted-fg">
+              Loading more… ({visible.length} of {filtered.length.toLocaleString('en-IN')})
+            </div>
+          )}
+          {visibleCount >= filtered.length && filtered.length > PAGE_SIZE && (
+            <div className="p-3 text-center text-[11px] text-muted-fg">
+              End of list · {filtered.length.toLocaleString('en-IN')} transactions
+            </div>
+          )}
         </Card>
       )}
 
@@ -237,23 +249,7 @@ export default function Transactions() {
           const t = detailTxn;
           setDetailTxn(null);
           if (!t) return;
-          const acc = await db.accounts.get(t.accountId);
-          if (acc) {
-            const reverse = (t.txnType === 'credit' ? -1 : 1) * Number(t.amount);
-            const balances = applyTxnDeltaToBalances(acc, t.profileId, reverse);
-            await db.accounts.update(acc.id, { balances, balance: null });
-          }
-          if (t.investmentId) {
-            const inv = await db.investments.get(t.investmentId);
-            if (inv) {
-              const invReverse = (t.txnType === 'credit' ? 1 : -1) * Number(t.amount);
-              await db.investments.update(inv.id, {
-                investedAmount: Math.max(0, Number(inv.investedAmount ?? 0) + invReverse)
-              });
-            }
-          }
-          await db.transactions.delete(t.id);
-          await reindexSlNo();
+          await deleteTransaction(t.id);
           success('Transaction deleted');
         }}
         categories={categories}
@@ -413,6 +409,11 @@ function TxnDetail({ txn, onClose, onEdit, onDelete, categories, accounts, profi
         <DetailRow label="Account" value={acct ? `${acct.name} ${maskNumber(acct.number)}` : '—'} />
         <DetailRow label="Type" value={<span className={txn.txnType === 'credit' ? 'text-success' : 'text-danger'}>{txn.txnType}</span>} />
         <DetailRow label="Sl. No." value={`#${txn.slNo}`} />
+        {txn.splitGroupId && (
+          <DetailRow label="Split" value={
+            <span className="text-primary">Part of a split · total {formatINR(txn.splitTotal ?? txn.amount, { hidePaise: true })}</span>
+          } />
+        )}
         {txn.description && <DetailRow label="Description" value={txn.description} />}
         {(txn.tags ?? []).length > 0 && (
           <DetailRow label="Tags" value={

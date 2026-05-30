@@ -3,11 +3,13 @@ import { Outlet } from 'react-router-dom';
 import { Plus } from 'lucide-react';
 import { Header } from './Header.jsx';
 import { BottomNav } from './BottomNav.jsx';
+import { LockGate } from './LockGate.jsx';
 import { TransactionSheet } from '@/components/transaction/TransactionSheet.jsx';
 
 export function AppShell() {
   const [adding, setAdding] = useState(false);
   return (
+    <LockGate>
     <div className="min-h-screen pb-16">
       <Header onAdd={() => setAdding(true)} />
 
@@ -28,5 +30,6 @@ export function AppShell() {
 
       <TransactionSheet open={adding} onClose={() => setAdding(false)} />
     </div>
+    </LockGate>
   );
 }

@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom';
-import { Home, ListOrdered, TrendingUp, Inbox, Settings } from 'lucide-react';
+import { Home, ListOrdered, TrendingUp, Inbox, FileText, Settings } from 'lucide-react';
 import { cn } from '@/lib/utils.js';
 
 const items = [
@@ -7,13 +7,14 @@ const items = [
   { to: '/transactions', label: 'Txns', icon: ListOrdered },
   { to: '/investments', label: 'Invest', icon: TrendingUp },
   { to: '/sms', label: 'SMS', icon: Inbox },
+  { to: '/statements', label: 'Stmt', icon: FileText },
   { to: '/settings', label: 'Settings', icon: Settings }
 ];
 
 export function BottomNav() {
   return (
     <nav className="fixed bottom-0 left-0 right-0 z-40 border-t border-border bg-background/95 backdrop-blur safe-bottom">
-      <div className="container max-w-3xl grid grid-cols-5">
+      <div className="container max-w-3xl grid grid-cols-6">
         {items.map(({ to, label, icon: Icon, end }) => (
           <NavLink
             key={to}

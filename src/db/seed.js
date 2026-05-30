@@ -1,4 +1,5 @@
-import { db } from './database.js';
+import { db, getSetting, setSetting } from './database.js';
+import { txnFingerprint } from '@/lib/utils.js';
 
 const DEFAULT_CATEGORIES = [
   { name: 'Food & Dining', icon: '🍽️', color: '#f97316', type: 'expense', subs: ['Groceries', 'Restaurants', 'Snacks', 'Beverages'] },
@@ -31,4 +32,32 @@ export async function seedIfEmpty() {
       }
     }
   }
+
+  await backfillFingerprints();
+}
+
+// One-time backfill: give pre-v4 transactions an importFingerprint so the
+// statement-import dedup can see them. Gated by a settings flag so we don't
+// full-scan the transactions table on every app load.
+async function backfillFingerprints() {
+  if (await getSetting('migrations.fingerprintsV4', false)) return;
+  const missing = await db.transactions.filter((t) => !t.importFingerprint).toArray();
+  if (missing.length === 0) {
+    await setSetting('migrations.fingerprintsV4', true);
+    return;
+  }
+  await db.transaction('rw', db.transactions, async () => {
+    for (const t of missing) {
+      await db.transactions.update(t.id, {
+        importFingerprint: txnFingerprint({
+          accountId: t.accountId,
+          amount: t.amount,
+          txnType: t.txnType,
+          dateTime: t.dateTime,
+          description: t.description
+        })
+      });
+    }
+  });
+  await setSetting('migrations.fingerprintsV4', true);
 }

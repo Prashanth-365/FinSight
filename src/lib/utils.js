@@ -56,10 +56,51 @@ export function uid(prefix = '') {
   return prefix + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 }
 
-export function todayLocalISO() {
-  const d = new Date();
+// ── Transaction fingerprint ────────────────────────────────────────────────
+// A stable hash identifying the same real-world transaction regardless of
+// whether it arrived via SMS, manual entry, or a statement import. We bucket
+// the date to the DAY (statements rarely carry the exact second; SMS does) and
+// use account + signed amount + the most distinctive description token.
+//
+// Returns a short hex string. Synchronous (FNV-1a) so it can run in tight loops.
+
+function normalizeDesc(desc) {
+  if (!desc) return '';
+  // Strip everything but letters/numbers, lowercase, keep the most stable bits.
+  // We pull out the longest alpha token (usually the merchant/UPI handle).
+  const cleaned = String(desc).toLowerCase().replace(/[^a-z0-9 ]/g, ' ');
+  const tokens = cleaned.split(/\s+/).filter((t) => t.length >= 3 && !/^\d+$/.test(t));
+  tokens.sort((a, b) => b.length - a.length);
+  return tokens.slice(0, 2).sort().join(' ');
+}
+
+function fnv1a(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+export function txnFingerprint({ accountId, amount, txnType, dateTime, description }) {
+  const day = new Date(dateTime);
+  day.setHours(0, 0, 0, 0);
+  const dayKey = day.getTime();
+  const signed = (txnType === 'credit' ? '+' : '-') + Math.round(Number(amount ?? 0) * 100);
+  const key = [accountId ?? 'x', signed, dayKey, normalizeDesc(description)].join('|');
+  return fnv1a(key);
+}
+
+// Convert a timestamp (default: now) into a value for <input type="datetime-local">.
+export function tsToLocalISO(ts = Date.now()) {
+  const d = new Date(ts);
   d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
   return d.toISOString().slice(0, 16); // YYYY-MM-DDTHH:mm
+}
+
+export function todayLocalISO() {
+  return tsToLocalISO();
 }
 
 export function fmtDate(ts) {

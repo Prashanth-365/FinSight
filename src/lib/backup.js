@@ -3,18 +3,19 @@ import { db, reindexSlNo, setSetting } from '@/db/database.js';
 import { encryptJson, decryptJson } from './crypto.js';
 import { uploadBackup, downloadBackup, findBackup } from './drive.js';
 
-const TABLES = [
+// Single source of truth for which tables are backed up / exported / imported.
+export const TABLES = [
   'users', 'profiles', 'accounts', 'categories',
-  'transactions', 'investments', 'chitFunds', 'smsQueue', 'settings'
+  'transactions', 'investments', 'chitFunds', 'smsQueue', 'statements', 'settings'
 ];
 
-async function dumpAll() {
+export async function dumpAll() {
   const data = {};
   for (const t of TABLES) data[t] = await db.table(t).toArray();
   return { version: 1, exportedAt: Date.now(), data };
 }
 
-async function restoreAll(payload) {
+export async function restoreAll(payload) {
   if (!payload?.data) throw new Error('Backup payload is malformed.');
   await db.transaction('rw', TABLES.map((t) => db.table(t)), async () => {
     for (const t of TABLES) {

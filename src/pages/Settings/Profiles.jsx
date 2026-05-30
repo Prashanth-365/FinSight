@@ -164,8 +164,8 @@ function ProfileEditor({ open, onClose, editing }) {
 
 export function SectionHeader({ title, subtitle, back = '/settings' }) {
   return (
-    <div className="flex items-center gap-2 mb-2">
-      <Link to={back} className="fs-btn-ghost"><ChevronLeft className="w-4 h-4" /></Link>
+    <div className="flex items-center gap-2 mb-2 mt-1">
+      {back && <Link to={back} className="fs-btn-ghost"><ChevronLeft className="w-4 h-4" /></Link>}
       <div className="flex-1">
         <h1 className="text-lg font-semibold leading-tight">{title}</h1>
         {subtitle && <p className="text-xs text-muted-fg">{subtitle}</p>}

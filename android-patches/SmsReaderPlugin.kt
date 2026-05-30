@@ -1,14 +1,10 @@
 package com.finsight.app
 
 import android.Manifest
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
 import android.net.Uri
 import android.os.Build
 import android.provider.Telephony
-import android.telephony.SmsMessage
 import com.getcapacitor.JSArray
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
@@ -26,16 +22,16 @@ import com.getcapacitor.annotation.Permission
                 Manifest.permission.READ_SMS,
                 Manifest.permission.RECEIVE_SMS
             ]
+        ),
+        Permission(
+            alias = "notifications",
+            strings = [
+                "android.permission.POST_NOTIFICATIONS"
+            ]
         )
     ]
 )
 class SmsReaderPlugin : Plugin() {
-
-    private var receiver: BroadcastReceiver? = null
-
-    // checkPermissions() and requestPermissions() are auto-provided by the base
-    // Plugin class because we declared the "sms" alias via @Permission above.
-    // No need to override them — doing so was the cause of the Kotlin compile error.
 
     /**
      * Read the existing SMS inbox. Options:
@@ -83,7 +79,7 @@ class SmsReaderPlugin : Plugin() {
                 var count = 0
                 while (cursor.moveToNext() && count < limit) {
                     val date = cursor.getLong(dateIdx)
-                    if (date < sinceTs) break  // sorted DESC by date, so we can stop
+                    if (date < sinceTs) break
                     val addr = cursor.getString(addrIdx) ?: ""
                     val body = cursor.getString(bodyIdx) ?: ""
                     val addrLower = addr.lowercase()
@@ -108,58 +104,31 @@ class SmsReaderPlugin : Plugin() {
         }
     }
 
-    /** Start listening for new incoming SMS — emits "smsReceived" events. */
+    /**
+     * Start a foreground service that listens for incoming SMS and posts a
+     * notification for each likely transactional one. Power-efficient because
+     * Android only wakes us when an SMS arrives.
+     */
     @PluginMethod
     fun startListener(call: PluginCall) {
         if (getPermissionState("sms") != com.getcapacitor.PermissionState.GRANTED) {
             call.reject("SMS permission not granted.")
             return
         }
-        if (receiver != null) {
-            call.resolve()
-            return
-        }
-        val filter = IntentFilter(Telephony.Sms.Intents.SMS_RECEIVED_ACTION)
-        receiver = object : BroadcastReceiver() {
-            override fun onReceive(ctx: Context?, intent: Intent?) {
-                if (intent?.action != Telephony.Sms.Intents.SMS_RECEIVED_ACTION) return
-                val messages: Array<SmsMessage> = Telephony.Sms.Intents.getMessagesFromIntent(intent)
-                // Concatenate multipart messages by sender
-                val grouped = messages.groupBy { it.originatingAddress ?: "" }
-                for ((sender, parts) in grouped) {
-                    val body = parts.joinToString(separator = "") { it.messageBody ?: "" }
-                    val ts = parts.firstOrNull()?.timestampMillis ?: System.currentTimeMillis()
-                    val payload = JSObject()
-                    payload.put("sender", sender)
-                    payload.put("body", body)
-                    payload.put("date", ts)
-                    notifyListeners("smsReceived", payload)
-                }
-            }
-        }
-        // Android 13+ requires the export flag
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+        val ctx = context
+        val intent = Intent(ctx, SmsListenerService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            ctx.startForegroundService(intent)
         } else {
-            context.registerReceiver(receiver, filter)
+            ctx.startService(intent)
         }
         call.resolve()
     }
 
     @PluginMethod
     fun stopListener(call: PluginCall) {
-        receiver?.let {
-            try { context.unregisterReceiver(it) } catch (_: Exception) {}
-        }
-        receiver = null
+        val ctx = context
+        ctx.stopService(Intent(ctx, SmsListenerService::class.java))
         call.resolve()
-    }
-
-    override fun handleOnDestroy() {
-        super.handleOnDestroy()
-        receiver?.let {
-            try { context.unregisterReceiver(it) } catch (_: Exception) {}
-        }
-        receiver = null
     }
 }

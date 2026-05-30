@@ -22,6 +22,11 @@ db.version(3).stores({
   transactions: '++id, slNo, dateTime, profileId, accountId, categoryId, subCategoryId, txnType, amount, investmentId'
 });
 
+db.version(4).stores({
+  transactions: '++id, slNo, dateTime, profileId, accountId, categoryId, subCategoryId, txnType, amount, investmentId, splitGroupId, importFingerprint, source',
+  statements: '++id, accountId, importedAt, status'
+});
+
 // re-number slNo across all transactions in chronological order.
 // Call after any insert/update/delete of transactions whose dateTime is non-trivial.
 export async function reindexSlNo() {

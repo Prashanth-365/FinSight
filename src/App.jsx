@@ -7,6 +7,7 @@ import Home from '@/pages/Home.jsx';
 import Transactions from '@/pages/Transactions.jsx';
 import Investments from '@/pages/Investments.jsx';
 import SmsQueue from '@/pages/SmsQueue.jsx';
+import Statements from '@/pages/Statements.jsx';
 import Settings, { SettingsLayout } from '@/pages/Settings/Settings.jsx';
 import Profiles from '@/pages/Settings/Profiles.jsx';
 import Accounts from '@/pages/Settings/Accounts.jsx';
@@ -37,6 +38,7 @@ export default function App() {
         <Route path="/transactions" element={<Transactions />} />
         <Route path="/investments" element={<Investments />} />
         <Route path="/sms" element={<SmsQueue />} />
+        <Route path="/statements" element={<Statements />} />
         <Route path="/settings" element={<SettingsLayout />}>
           <Route index element={<Settings />} />
           <Route path="profiles" element={<Profiles />} />

@@ -38,29 +38,34 @@ const mainSrc = fs.readFileSync(path.join(__dirname, 'MainActivity.java'), 'utf8
 fs.writeFileSync(path.join(PACKAGE_PATH, 'MainActivity.java'), mainSrc);
 log('Wrote MainActivity.java');
 
-// 2. SmsReaderPlugin.kt
-const kotlinSrc = fs.readFileSync(path.join(__dirname, 'SmsReaderPlugin.kt'), 'utf8');
-fs.writeFileSync(path.join(PACKAGE_PATH, 'SmsReaderPlugin.kt'), kotlinSrc);
-log('Wrote SmsReaderPlugin.kt');
+// 2. Native plugin sources
+for (const f of ['SmsReaderPlugin.kt', 'SmsListenerService.kt', 'BiometricAuthPlugin.kt']) {
+  const src = fs.readFileSync(path.join(__dirname, f), 'utf8');
+  fs.writeFileSync(path.join(PACKAGE_PATH, f), src);
+  log('Wrote ' + f);
+}
 
-// 3. AndroidManifest.xml — add SMS permissions + OAuth deep-link intent-filter
+// 3. AndroidManifest.xml — permissions + deep links + foreground service
 let manifest = fs.readFileSync(MANIFEST, 'utf8');
+let changed = false;
+
 const permsToAdd = [
   '<uses-permission android:name="android.permission.READ_SMS" />',
-  '<uses-permission android:name="android.permission.RECEIVE_SMS" />'
+  '<uses-permission android:name="android.permission.RECEIVE_SMS" />',
+  '<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />',
+  '<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />',
+  '<uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />',
+  '<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />',
+  '<uses-permission android:name="android.permission.USE_BIOMETRIC" />'
 ];
-let changed = false;
 for (const p of permsToAdd) {
   if (!manifest.includes(p)) {
-    manifest = manifest.replace(
-      /<manifest([^>]*)>/,
-      `<manifest$1>\n    ${p}`
-    );
+    manifest = manifest.replace(/<manifest([^>]*)>/, `<manifest$1>\n    ${p}`);
     changed = true;
   }
 }
 
-// OAuth deep-link: handles com.finsight.app://oauth-success
+// MainActivity deep-link intent filters — OAuth return + SMS notification tap
 const oauthFilter = `
             <intent-filter android:autoVerify="false">
                 <action android:name="android.intent.action.VIEW" />
@@ -68,18 +73,38 @@ const oauthFilter = `
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="com.finsight.app" android:host="oauth-success" />
             </intent-filter>`;
-if (!manifest.includes('com.finsight.app') || !manifest.includes('oauth-success')) {
-  // Insert inside the MainActivity <activity> block, after the existing intent-filter
+const smsIncomingFilter = `
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="com.finsight.app" android:host="sms-incoming" />
+            </intent-filter>`;
+if (!manifest.includes('oauth-success') || !manifest.includes('sms-incoming')) {
   manifest = manifest.replace(
     /(<activity[^>]*android:name="\.MainActivity"[\s\S]*?)(<\/activity>)/,
-    (m, head, tail) => head + oauthFilter + '\n        ' + tail
+    (m, head, tail) => head + oauthFilter + smsIncomingFilter + '\n        ' + tail
+  );
+  changed = true;
+}
+
+// Foreground service declaration — must live inside <application>
+const serviceDecl = `
+        <service
+            android:name=".SmsListenerService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />`;
+if (!manifest.includes('SmsListenerService')) {
+  manifest = manifest.replace(
+    /(<application[^>]*>)/,
+    (m, head) => head + serviceDecl
   );
   changed = true;
 }
 
 if (changed) {
   fs.writeFileSync(MANIFEST, manifest);
-  log('Updated AndroidManifest.xml (permissions + OAuth deep link)');
+  log('Updated AndroidManifest.xml (perms + deep links + service)');
 } else {
   log('AndroidManifest.xml already up to date');
 }
@@ -110,6 +135,17 @@ if (!appGradle.includes("apply plugin: 'kotlin-android'") && !appGradle.includes
   );
   fs.writeFileSync(APP_GRADLE, appGradle);
   log('Applied kotlin-android plugin in app/build.gradle');
+}
+
+// 6. App-level build.gradle — add androidx.biometric dependency
+appGradle = fs.readFileSync(APP_GRADLE, 'utf8');
+if (!appGradle.includes('androidx.biometric')) {
+  appGradle = appGradle.replace(
+    /(dependencies\s*\{)/,
+    `$1\n    implementation "androidx.biometric:biometric:1.1.0"`
+  );
+  fs.writeFileSync(APP_GRADLE, appGradle);
+  log('Added androidx.biometric dependency to app/build.gradle');
 }
 
 log('Patches applied successfully ✓');

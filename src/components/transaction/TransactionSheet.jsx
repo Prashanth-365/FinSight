@@ -1,15 +1,16 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db, reindexSlNo } from '@/db/database.js';
+import { applyTransactionEffects } from '@/db/txnEffects.js';
 import { Sheet } from '@/components/ui/Modal.jsx';
 import { Field } from '@/components/ui/Input.jsx';
 import { Combobox } from '@/components/ui/Combobox.jsx';
 import { Select } from '@/components/ui/Select.jsx';
 import { useProfile } from '@/context/ProfileContext.jsx';
 import { useToast } from '@/components/ui/Toast.jsx';
-import { freqSorted, todayLocalISO, maskNumber, applyTxnDeltaToBalances, getAccountBalance, inferInvestmentPlatform } from '@/lib/utils.js';
+import { freqSorted, todayLocalISO, maskNumber, getAccountBalance, inferInvestmentPlatform, txnFingerprint, uid } from '@/lib/utils.js';
 import { formatINR } from '@/lib/currency.js';
-import { ArrowDownLeft, ArrowUpRight, Users, ChevronLeft, ChevronRight, Trash2 } from 'lucide-react';
+import { ArrowDownLeft, ArrowUpRight, Users, ChevronLeft, ChevronRight, Trash2, Split, Plus, X } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { cn } from '@/lib/utils.js';
 
@@ -24,7 +25,9 @@ const empty = (profileId) => ({
   txnType: 'debit',
   description: '',
   tags: '',
-  investmentName: '' // used only when category resolves to type='investment'
+  investmentName: '', // used only when category resolves to type='investment'
+  split: false,
+  splits: [] // [{ key, name, amount, isMe }]
 });
 
 export function TransactionSheet({
@@ -74,9 +77,13 @@ export function TransactionSheet({
         investmentName: linkedInv?.name ?? ''
       });
     } else {
-      setForm({ ...empty(activeProfileId), ...(initial ?? {}) });
+      // Pick a sensible default profile:
+      //   1) the currently-active profile, if the user has one selected
+      //   2) the first profile in the list (when in master view)
+      const defaultProfile = activeProfileId ?? profiles[0]?.id ?? null;
+      setForm({ ...empty(defaultProfile), ...(initial ?? {}) });
     }
-  }, [open, editing, activeProfileId, initial]); // eslint-disable-line
+  }, [open, editing, activeProfileId, initial, profiles]); // eslint-disable-line
 
   const categorySuggestions = useMemo(() => {
     const topLevel = categories.filter((c) => c.parentId == null).map((c) => c.name);
@@ -128,14 +135,121 @@ export function TransactionSheet({
       .map((i) => ({ value: i.name, label: i.name, hint: i.platform }));
   }, [investments, form.profileId, form.subCategory, isInvestmentCategory]);
 
+  // Find-or-create a category by name at a given parent level.
+  const ensureCategory = async (name, parentId, type, icon = '🏷️', color = '#94a3b8') => {
+    let row = await db.categories
+      .where({ name })
+      .filter((c) => (c.parentId ?? null) === (parentId ?? null))
+      .first();
+    if (!row) {
+      const id = await db.categories.add({ name, parentId: parentId ?? null, icon, color, type });
+      row = await db.categories.get(id);
+    }
+    return row;
+  };
+
+  // Build + persist all split rows. `cat`/`sub` are the resolved category for
+  // the payer's own share. Everyone else is logged under Transfer > {name}.
+  const saveSplit = async ({ cat, sub, dateTime, tags }) => {
+    const rows = (form.splits ?? [])
+      .map((s) => ({ ...s, amount: Number(s.amount) }))
+      .filter((s) => s.name?.trim() && isFinite(s.amount) && s.amount > 0);
+    if (rows.length < 2) throw new Error('Add at least two people to split between.');
+
+    const total = rows.reduce((sum, s) => sum + s.amount, 0);
+    const transferCat = await ensureCategory('Transfer', null, 'transfer', '🔁', '#94a3b8');
+
+    // One shared fingerprint computed on the TOTAL, so a future statement import
+    // of the single ₹total debit dedups against this split group.
+    const groupFingerprint = txnFingerprint({
+      accountId: Number(form.accountId),
+      amount: total,
+      txnType: form.txnType,
+      dateTime,
+      description: form.description
+    });
+    const splitGroupId = uid('split_');
+    const desc = form.description ?? '';
+
+    const payloads = [];
+    for (const s of rows) {
+      let catId, subId;
+      if (s.isMe) {
+        catId = cat.id;
+        subId = sub?.id ?? null;
+      } else {
+        const personSub = await ensureCategory(s.name.trim(), transferCat.id, 'transfer', '🔁', '#94a3b8');
+        catId = transferCat.id;
+        subId = personSub.id;
+      }
+      payloads.push({
+        slNo: 0,
+        dateTime,
+        profileId: Number(form.profileId),
+        accountId: Number(form.accountId),
+        categoryId: catId,
+        subCategoryId: subId,
+        amount: s.amount,
+        txnType: form.txnType,
+        paymentMode: selectedAccount?.type ?? 'bank',
+        description: desc,
+        tags,
+        source: smsLink ? 'sms' : 'manual',
+        investmentId: null,
+        splitGroupId,
+        splitTotal: total,
+        importFingerprint: groupFingerprint
+      });
+    }
+
+    await db.transactions.bulkAdd(payloads);
+    await reindexSlNo();
+
+    // Each split row applies its own amount; the sum debits the account by the
+    // full total. Routed through the shared effects helper for consistency.
+    for (const p of payloads) await applyTransactionEffects(p, +1);
+
+    if (smsLink) {
+      await db.smsQueue.update(smsLink, { status: 'processed', linkedTxnId: null });
+    }
+  };
+
+  const splitTotal = useMemo(
+    () => (form.splits ?? []).reduce((sum, s) => sum + (Number(s.amount) || 0), 0),
+    [form.splits]
+  );
+
+  const toggleSplit = (on) => {
+    if (on) {
+      // seed with a "Me" row carrying the current amount, plus a blank person row
+      const meName = profiles.find((p) => p.id === Number(form.profileId))?.name ?? 'Me';
+      setForm((f) => ({
+        ...f,
+        split: true,
+        splits: [
+          { key: uid('s_'), name: meName, amount: f.amount || '', isMe: true },
+          { key: uid('s_'), name: '', amount: '', isMe: false }
+        ]
+      }));
+    } else {
+      setForm((f) => ({ ...f, split: false, splits: [] }));
+    }
+  };
+
   // `mode` = 'close' (default — save and close)  or  'continue' (save & add another)
   const save = async (mode = 'close') => {
     try {
       if (!form.profileId) throw new Error('Please pick a profile.');
       if (!form.accountId) throw new Error('Please pick an account.');
-      const amt = Number(form.amount);
-      if (!isFinite(amt) || amt <= 0) throw new Error('Amount must be a positive number.');
       if (!form.category) throw new Error('Please pick or type a category.');
+      // In split mode the "amount" is the computed total; otherwise it's typed.
+      const amt = form.split ? splitTotal : Number(form.amount);
+      if (!isFinite(amt) || amt <= 0) throw new Error('Amount must be a positive number.');
+      if (form.split) {
+        const named = (form.splits ?? []).filter((s) => s.name?.trim() && Number(s.amount) > 0);
+        if (named.length < 2) throw new Error('Add at least two people with amounts to split.');
+        if (!(form.splits ?? []).some((s) => s.isMe)) throw new Error('Mark which row is your own share.');
+      }
 
       // ensure category exists (top-level)
       let cat = await db.categories.where({ name: form.category }).filter((c) => c.parentId == null).first();
@@ -158,6 +272,21 @@ export function TransactionSheet({
 
       const dateTime = new Date(form.dateTime).getTime();
       const tags = (form.tags ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+
+      // ── SPLIT path ───────────────────────────────────────────────────────
+      // One real bank debit, divided among people. We create one transaction
+      // per split row, all sharing a splitGroupId + description + date.
+      if (form.split && !form.id) {
+        await saveSplit({ cat, sub, dateTime, tags });
+        success('Split transaction added');
+        if (mode === 'continue') {
+          if (smsLink && onSavedAndNext) onSavedAndNext();
+          else setForm((f) => ({ ...f, amount: '', description: '', split: false, splits: [] }));
+        } else {
+          onClose?.();
+        }
+        return;
+      }
 
       // If this is an investment-type category and the user supplied/picked a
       // holding name, find-or-create the investment record and capture its id.
@@ -201,60 +330,26 @@ export function TransactionSheet({
         description: form.description ?? '',
         tags,
         source: smsLink ? 'sms' : 'manual',
-        investmentId
+        investmentId,
+        importFingerprint: txnFingerprint({
+          accountId: Number(form.accountId),
+          amount: amt,
+          txnType: form.txnType,
+          dateTime,
+          description: form.description
+        })
       };
 
-      // When editing, we must first REVERSE the old balance + invested-amount
-      // effects, then re-apply the new ones — otherwise account totals drift.
-      const oldTxn = form.id ? await db.transactions.get(form.id) : null;
-      if (oldTxn) {
-        const oldAccount = await db.accounts.get(oldTxn.accountId);
-        if (oldAccount) {
-          const reverse = (oldTxn.txnType === 'credit' ? -1 : 1) * Number(oldTxn.amount ?? 0);
-          const balances = applyTxnDeltaToBalances(oldAccount, oldTxn.profileId, reverse);
-          await db.accounts.update(oldAccount.id, { balances, balance: null });
-        }
-        if (oldTxn.investmentId) {
-          const oldInv = await db.investments.get(oldTxn.investmentId);
-          if (oldInv) {
-            const invReverse = (oldTxn.txnType === 'credit' ? 1 : -1) * Number(oldTxn.amount ?? 0);
-            await db.investments.update(oldInv.id, {
-              investedAmount: Math.max(0, Number(oldInv.investedAmount ?? 0) + invReverse)
-            });
-          }
-        }
-      }
-
-      let txnId;
+      // When editing, reverse the OLD effects before applying the new ones so
+      // balances/invested amounts never drift (all sign math lives in txnEffects).
       if (form.id) {
-        txnId = form.id;
+        const oldTxn = await db.transactions.get(form.id);
+        await applyTransactionEffects(oldTxn, -1);
         await db.transactions.update(form.id, payload);
-      } else {
-        txnId = await db.transactions.add(payload);
       }
-
+      const txnId = form.id ?? await db.transactions.add(payload);
       await reindexSlNo();
-
-      // Apply new balance delta on the chosen account
-      if (selectedAccount) {
-        const delta = (form.txnType === 'credit' ? 1 : -1) * amt;
-        const balances = applyTxnDeltaToBalances(selectedAccount, Number(form.profileId), delta);
-        await db.accounts.update(selectedAccount.id, { balances, balance: null });
-      }
-
-      // Apply new invested-amount delta (debit on an investment row = money in)
-      if (investmentId) {
-        const inv = await db.investments.get(investmentId);
-        if (inv) {
-          const invDelta = (form.txnType === 'credit' ? -1 : 1) * amt;
-          const nextInvested = Math.max(0, Number(inv.investedAmount ?? 0) + invDelta);
-          const nextCurrent = Math.max(Number(inv.currentValue ?? 0), nextInvested);
-          await db.investments.update(investmentId, {
-            investedAmount: nextInvested,
-            currentValue: nextCurrent
-          });
-        }
-      }
+      await applyTransactionEffects({ ...payload, id: txnId }, +1);
 
       // Mark the originating SMS as processed (when this sheet was opened from an SMS row)
       if (smsLink) {
@@ -411,10 +506,45 @@ export function TransactionSheet({
           inputMode="decimal"
           className="fs-input text-lg font-semibold"
           placeholder="0.00"
-          value={form.amount}
+          value={form.split ? splitTotal || '' : form.amount}
+          disabled={form.split}
           onChange={(e) => setForm({ ...form, amount: e.target.value })}
         />
+        {form.split && (
+          <p className="text-[11px] text-muted-fg mt-1">Total is the sum of the splits below.</p>
+        )}
       </Field>
+
+      {/* Split toggle — only for new transactions */}
+      {!form.id && (
+        <div className="flex items-center justify-between rounded-xl border border-border bg-elevated px-3 py-2.5 mb-3">
+          <div className="flex items-center gap-2">
+            <Split className="w-4 h-4 text-primary" />
+            <div>
+              <p className="text-sm font-medium">Split with others</p>
+              <p className="text-[11px] text-muted-fg">Log everyone's share; others go under Transfer.</p>
+            </div>
+          </div>
+          <button
+            role="switch"
+            aria-checked={form.split}
+            onClick={() => toggleSplit(!form.split)}
+            className={cn('shrink-0 w-11 h-6 rounded-full relative transition-colors', form.split ? 'bg-primary' : 'bg-muted')}
+          >
+            <span className={cn('absolute top-0.5 w-5 h-5 bg-white rounded-full transition-all', form.split ? 'left-[22px]' : 'left-0.5')} />
+          </button>
+        </div>
+      )}
+
+      {form.split && (
+        <SplitPanel
+          splits={form.splits}
+          profiles={profiles}
+          activeProfileId={form.profileId}
+          total={splitTotal}
+          onChange={(splits) => setForm((f) => ({ ...f, splits }))}
+        />
+      )}
 
       <div className="grid grid-cols-2 gap-3">
         <Field label="Date & time">
@@ -449,7 +579,7 @@ export function TransactionSheet({
       </Field>
 
       <div className="grid grid-cols-2 gap-3">
-        <Field label="Category">
+        <Field label={form.split ? 'Category (your share)' : 'Category'}>
           <Combobox
             value={form.category}
             onChange={(v) => setForm({ ...form, category: v, subCategory: '' })}
@@ -505,6 +635,73 @@ export function TransactionSheet({
 
 function typeBadge(t) {
   return t === 'card' ? '💳' : t === 'wallet' ? '👛' : '🏦';
+}
+
+function SplitPanel({ splits, profiles, activeProfileId, total, onChange }) {
+  const update = (key, patch) => onChange(splits.map((s) => (s.key === key ? { ...s, ...patch } : s)));
+  const remove = (key) => onChange(splits.filter((s) => s.key !== key));
+  const add = () => onChange([...splits, { key: uid('s_'), name: '', amount: '', isMe: false }]);
+  // Only one row can be "me"; choosing a new me clears the rest.
+  const setMe = (key) => onChange(splits.map((s) => ({ ...s, isMe: s.key === key })));
+
+  const profileNames = profiles.map((p) => p.name);
+
+  return (
+    <div className="mb-3 rounded-xl border border-border bg-elevated/60 p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-medium text-muted-fg">Who shares this?</p>
+        <p className="text-xs tabular-nums">
+          Total <span className="font-semibold">{formatINR(total, { hidePaise: true })}</span>
+        </p>
+      </div>
+
+      {splits.map((s) => (
+        <div key={s.key} className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setMe(s.key)}
+            className={cn(
+              'shrink-0 text-[10px] px-2 py-1 rounded-lg border',
+              s.isMe ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-fg'
+            )}
+            title="Mark as your own share"
+          >
+            {s.isMe ? 'You' : 'Set you'}
+          </button>
+          <input
+            className="fs-input flex-1 py-1.5"
+            list="fs-split-names"
+            placeholder="Name"
+            value={s.name}
+            onChange={(e) => update(s.key, { name: e.target.value })}
+          />
+          <input
+            inputMode="decimal"
+            className="fs-input w-24 py-1.5 text-right"
+            placeholder="0"
+            value={s.amount}
+            onChange={(e) => update(s.key, { amount: e.target.value })}
+          />
+          <button
+            type="button"
+            onClick={() => remove(s.key)}
+            className="shrink-0 p-1.5 rounded-lg hover:bg-muted text-muted-fg hover:text-danger"
+            aria-label="Remove person"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      ))}
+
+      <datalist id="fs-split-names">
+        {profileNames.map((n) => <option key={n} value={n} />)}
+      </datalist>
+
+      <button type="button" onClick={add} className="fs-btn-ghost text-xs w-full justify-center">
+        <Plus className="w-3.5 h-3.5" /> Add person
+      </button>
+    </div>
+  );
 }
 
 function TypeToggle({ active, onClick, icon, label, tone }) {

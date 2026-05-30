@@ -27,8 +27,20 @@ export async function checkSmsPermission() {
 export async function ensureSmsPermission() {
   const cur = await SmsReader.checkPermissions();
   if (cur.sms === 'granted') return true;
-  const after = await SmsReader.requestPermissions();
+  const after = await SmsReader.requestPermissions({ permissions: ['sms'] });
   return after.sms === 'granted';
+}
+
+export async function ensureNotificationPermission() {
+  // Android 13+ requires runtime POST_NOTIFICATIONS. Older versions auto-grant.
+  try {
+    const cur = await SmsReader.checkPermissions();
+    if (cur.notifications === 'granted') return true;
+    const after = await SmsReader.requestPermissions({ permissions: ['notifications'] });
+    return after.notifications === 'granted';
+  } catch {
+    return true; // pre-Android-13 or non-native = no runtime request needed
+  }
 }
 
 // Default sender substrings used to find bank/UPI SMS in the user's inbox.
