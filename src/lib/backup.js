@@ -71,6 +71,27 @@ export async function pullBackup(passphrase) {
   return { restoredAt: Date.now(), exportedAt: payload.exportedAt };
 }
 
+/**
+ * Before overwriting, check the entered passphrase can open the CURRENT Drive
+ * backup. There's no stored "correct" passphrase, so the existing encrypted file
+ * is our verifier — this catches a typo that would otherwise lock the next backup.
+ *   { ok: true,  firstBackup: true  } → nothing on Drive yet to verify against
+ *   { ok: true,  firstBackup: false } → matches the existing backup (or it's plaintext)
+ *   { ok: false, firstBackup: false } → passphrase can't open the existing backup
+ */
+export async function verifyPassphraseAgainstRemote(passphrase) {
+  const got = await downloadBackup();
+  if (!got) return { ok: true, firstBackup: true };
+  const env = got.envelope;
+  if (!(env?.alg && env?.ct)) return { ok: true, firstBackup: false }; // remote is plaintext
+  try {
+    await decryptJson(env, passphrase);
+    return { ok: true, firstBackup: false };
+  } catch {
+    return { ok: false, firstBackup: false };
+  }
+}
+
 export async function remoteStatus() {
   try {
     const f = await findBackup();

@@ -36,6 +36,7 @@ export function TransactionSheet({
   editing = null,
   initial = null,
   smsLink = null,
+  sourceKind = 'sms', // 'sms' | 'statement' — provenance stamped on the created txn
   // SMS-conversion navigation (all optional, only used when smsLink is set)
   smsText = '',
   smsIndex = null,    // 1-based position in pending list
@@ -194,7 +195,7 @@ export function TransactionSheet({
         paymentMode: selectedAccount?.type ?? 'bank',
         description: desc,
         tags,
-        source: smsLink ? 'sms' : 'manual',
+        source: smsLink ? sourceKind : 'manual',
         investmentId: null,
         splitGroupId,
         splitTotal: total,
@@ -329,7 +330,7 @@ export function TransactionSheet({
         paymentMode: selectedAccount?.type ?? 'bank',
         description: form.description ?? '',
         tags,
-        source: smsLink ? 'sms' : 'manual',
+        source: smsLink ? sourceKind : 'manual',
         investmentId,
         importFingerprint: txnFingerprint({
           accountId: Number(form.accountId),

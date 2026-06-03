@@ -8,7 +8,7 @@ import { useToast } from '@/components/ui/Toast.jsx';
 import { SectionHeader } from './Profiles.jsx';
 import { passphraseScore } from '@/lib/crypto.js';
 import { isSignedIn, signInWithGoogle, getEffectiveClientId } from '@/lib/googleAuth.js';
-import { pushBackup, pullBackup, remoteStatus, TABLES, dumpAll, restoreAll } from '@/lib/backup.js';
+import { pushBackup, pullBackup, remoteStatus, verifyPassphraseAgainstRemote, TABLES, dumpAll, restoreAll } from '@/lib/backup.js';
 import { fmtDateTime, cn } from '@/lib/utils.js';
 
 export default function Data() {
@@ -122,6 +122,9 @@ function DriveCard() {
   const [confirmPull, setConfirmPull] = useState(false);
   const [encrypt, setEncrypt] = useState(true);
   const [confirmTurnOff, setConfirmTurnOff] = useState(false);
+  const [confirmPassOpen, setConfirmPassOpen] = useState(false);
+  const [confirmPass, setConfirmPass] = useState('');
+  const [mismatchOpen, setMismatchOpen] = useState(false);
 
   useEffect(() => {
     setConnected(isSignedIn());
@@ -187,13 +190,10 @@ function DriveCard() {
     return isSignedIn();
   };
 
-  const handlePush = async () => {
+  const reallyPush = async () => {
+    setConfirmPassOpen(false);
+    setMismatchOpen(false);
     try {
-      if (encrypt) {
-        if (!passphrase) throw new Error('Enter your encryption passphrase.');
-        if (passphraseScore(passphrase) < 2) throw new Error('Passphrase is too weak. Use 8+ chars with mixed case / digits.');
-      }
-      if (!(await ensureConnected())) return;
       setBusy('push');
       const meta = await pushBackup(passphrase, { encrypt });
       setStatus((s) => ({ ...s, lastSyncedAt: Date.now(), remoteModifiedTime: meta.modifiedTime ?? null, exists: true, lastEncrypted: encrypt }));
@@ -201,6 +201,31 @@ function DriveCard() {
     } catch (e) {
       error(e.message);
     } finally {
+      setBusy('');
+    }
+  };
+
+  const handlePush = async () => {
+    try {
+      if (encrypt) {
+        if (!passphrase) throw new Error('Enter your encryption passphrase.');
+        if (passphraseScore(passphrase) < 2) throw new Error('Passphrase is too weak. Use 8+ chars with mixed case / digits.');
+      }
+      if (!(await ensureConnected())) return;
+
+      // Encryption has no "correct" passphrase to check against — a typo silently
+      // locks the backup. Guard it: verify against the existing Drive file, and on
+      // the very first backup (nothing to verify against) confirm by re-typing.
+      if (encrypt) {
+        setBusy('verify');
+        const v = await verifyPassphraseAgainstRemote(passphrase);
+        setBusy('');
+        if (v.firstBackup) { setConfirmPass(''); setConfirmPassOpen(true); return; }
+        if (!v.ok) { setMismatchOpen(true); return; }
+      }
+      await reallyPush();
+    } catch (e) {
+      error(e.message);
       setBusy('');
     }
   };
@@ -276,7 +301,7 @@ function DriveCard() {
       </div>
 
       {encrypt && (
-        <Field label="Encryption passphrase" hint="Used only in this browser session. Never uploaded. Lose it = backup is unreadable.">
+        <Field label="Encryption passphrase" hint="Used only in this browser session. Never uploaded. We check it against your existing backup to catch typos. Lose it = backup is unreadable.">
           <div className="relative">
             <input
               className="fs-input pr-10"
@@ -306,7 +331,7 @@ function DriveCard() {
           </button>
         )}
         <button className="fs-btn-primary" onClick={handlePush} disabled={!!busy}>
-          <Cloud className="w-4 h-4" /> {busy === 'push' ? 'Encrypting & uploading…' : 'Back up now'}
+          <Cloud className="w-4 h-4" /> {busy === 'push' ? 'Encrypting & uploading…' : busy === 'verify' ? 'Checking passphrase…' : 'Back up now'}
         </button>
         <button className="fs-btn-secondary" onClick={() => setConfirmPull(true)} disabled={!!busy}>
           <RefreshCw className={cn('w-4 h-4', busy === 'pull' && 'animate-spin')} /> Restore from Drive
@@ -347,6 +372,50 @@ function DriveCard() {
         danger
         confirmText="Turn off encryption"
       />
+
+      <ConfirmDialog
+        open={mismatchOpen}
+        onClose={() => setMismatchOpen(false)}
+        onConfirm={reallyPush}
+        title="Passphrase doesn't match your backup"
+        message="This passphrase can't open the backup currently on Drive — most likely a typo. If you're deliberately changing your passphrase you can continue; otherwise cancel and re-enter it. Continuing overwrites the existing backup with this passphrase."
+        danger
+        confirmText="Use this passphrase anyway"
+      />
+
+      <Modal
+        open={confirmPassOpen}
+        onClose={() => setConfirmPassOpen(false)}
+        title="Confirm your passphrase"
+        size="sm"
+        footer={
+          <>
+            <button className="fs-btn-ghost" onClick={() => setConfirmPassOpen(false)}>Cancel</button>
+            <button
+              className="fs-btn-primary"
+              onClick={() => {
+                if (confirmPass !== passphrase) { error("Passphrases don't match — check for a typo."); return; }
+                reallyPush();
+              }}
+            >
+              Confirm &amp; back up
+            </button>
+          </>
+        }
+      >
+        <p className="text-xs text-muted-fg mb-3">
+          This is your first encrypted backup, so there's nothing to check it against yet. Re-enter the
+          passphrase to rule out a typo — if you lose it, the backup can't be recovered.
+        </p>
+        <input
+          className="fs-input"
+          type="password"
+          placeholder="Re-enter passphrase"
+          value={confirmPass}
+          onChange={(e) => setConfirmPass(e.target.value)}
+          autoComplete="new-password"
+        />
+      </Modal>
     </Card>
   );
 }

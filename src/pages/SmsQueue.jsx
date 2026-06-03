@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import {
   Inbox, Plus, Wand2, X, Smartphone, Download, Radio, ChevronLeft, ChevronRight,
-  EyeOff, RotateCcw
+  EyeOff, RotateCcw, FileText, Upload
 } from 'lucide-react';
 import { db, getSetting, setSetting } from '@/db/database.js';
 import {
@@ -16,7 +15,9 @@ import { EmptyState } from '@/components/ui/Empty.jsx';
 import { Modal } from '@/components/ui/Modal.jsx';
 import { useToast } from '@/components/ui/Toast.jsx';
 import { TransactionSheet } from '@/components/transaction/TransactionSheet.jsx';
-import { aliasMatchesAccountNumber, fmtDateTime, todayLocalISO, tsToLocalISO, cn } from '@/lib/utils.js';
+import { StatementImportModal } from '@/pages/Statements.jsx';
+import { matchAccountForSms, findAlreadyInBooks } from '@/lib/reconcile.js';
+import { fmtDateTime, todayLocalISO, tsToLocalISO, cn } from '@/lib/utils.js';
 import { formatINR } from '@/lib/currency.js';
 
 /* ───────── Native SMS controls ───────── */
@@ -396,10 +397,13 @@ function parseSms(raw) {
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100, 'All'];
 
-export default function SmsQueue() {
+export default function Inbox() {
   const queue = useLiveQuery(() => db.smsQueue.orderBy('dateTime').reverse().toArray(), [], []);
   const accounts = useLiveQuery(() => db.accounts.toArray(), [], []);
+  const allTxns = useLiveQuery(() => db.transactions.toArray(), [], []);
+  const { info } = useToast();
   const [adding, setAdding] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   const [showDismissed, setShowDismissed] = useState(false);
   const [pageSize, setPageSize] = useState(50);
@@ -449,6 +453,16 @@ export default function SmsQueue() {
   const processed = useMemo(() => (queue ?? []).filter((s) => s.status === 'processed'), [queue]);
   const dismissed = useMemo(() => (queue ?? []).filter((s) => s.status === 'dismissed'), [queue]);
 
+  // Live "already in your books" flag for pending rows (multiplicity-aware).
+  const dupIds = useMemo(() => findAlreadyInBooks(pending, allTxns, accounts), [pending, allTxns, accounts]);
+  const dupCount = dupIds.size;
+  const dismissDuplicates = async () => {
+    const ids = pending.filter((s) => dupIds.has(s.id)).map((s) => s.id);
+    if (!ids.length) return;
+    await db.smsQueue.where('id').anyOf(ids).modify({ status: 'dismissed' });
+    info(`Dismissed ${ids.length} already-logged item${ids.length === 1 ? '' : 's'}`);
+  };
+
   const pendingPage = useMemo(() => {
     if (pageSize === 'All') return pending;
     const start = (page - 1) * pageSize;
@@ -462,15 +476,19 @@ export default function SmsQueue() {
     <div className="space-y-3 animate-fade-in">
       <div className="flex items-start justify-between gap-2 flex-wrap">
         <div>
-          <h1 className="text-lg font-semibold">SMS inbox</h1>
+          <h1 className="text-lg font-semibold">Inbox</h1>
           <p className="text-xs text-muted-fg">
-            Review parsed SMS and convert into transactions. Missed a few? Catch them via{' '}
-            <Link to="/statements" className="text-primary">Statement import</Link>.
+            Parsed SMS and statement rows that aren't in your books yet. Convert the ones you want into transactions.
           </p>
         </div>
-        <button className="fs-btn-secondary" onClick={() => setAdding(true)}>
-          <Plus className="w-4 h-4" /> Paste SMS
-        </button>
+        <div className="flex gap-2">
+          <button className="fs-btn-secondary" onClick={() => setImporting(true)}>
+            <Upload className="w-4 h-4" /> Import statement
+          </button>
+          <button className="fs-btn-secondary" onClick={() => setAdding(true)}>
+            <Plus className="w-4 h-4" /> Paste SMS
+          </button>
+        </div>
       </div>
 
       {isNativeAndroid() && <NativeSmsControls />}
@@ -478,8 +496,17 @@ export default function SmsQueue() {
       {/* Pending list */}
       <Card>
         <div className="px-4 py-2 flex items-center justify-between gap-2 border-b border-border">
-          <div className="text-xs font-semibold text-muted-fg uppercase tracking-wider">
-            Pending ({pending.length.toLocaleString('en-IN')})
+          <div className="text-xs font-semibold text-muted-fg uppercase tracking-wider flex items-center gap-2 flex-wrap">
+            <span>Pending ({pending.length.toLocaleString('en-IN')})</span>
+            {dupCount > 0 && (
+              <button
+                onClick={dismissDuplicates}
+                className="fs-chip text-warning normal-case font-medium hover:bg-warning/10"
+                title="These already exist in your transactions — dismiss them all"
+              >
+                {dupCount} already logged · dismiss all
+              </button>
+            )}
           </div>
           {pending.length > 0 && (
             <div className="flex items-center gap-2 text-xs">
@@ -503,8 +530,8 @@ export default function SmsQueue() {
             icon={Inbox}
             title="Inbox is empty"
             hint={isNativeAndroid()
-              ? 'Tap "Import past SMS" above to scan your phone\'s inbox for bank/UPI messages.'
-              : 'Paste a bank/UPI SMS to auto-parse fields, or install the Android APK for automatic SMS sync.'}
+              ? 'Tap "Import past SMS" above to scan your phone\'s inbox, or import a bank statement.'
+              : 'Paste a bank/UPI SMS, import a bank statement, or install the Android APK for automatic SMS sync.'}
             action={<button className="fs-btn-primary" onClick={() => setAdding(true)}>Paste SMS</button>}
           />
         ) : (
@@ -515,6 +542,7 @@ export default function SmsQueue() {
                   key={sms.id}
                   sms={sms}
                   accounts={accounts}
+                  isDuplicate={dupIds.has(sms.id)}
                   onConvert={(id) => setConvertingSmsId(id)}
                 />
               ))}
@@ -586,6 +614,7 @@ export default function SmsQueue() {
       )}
 
       <AddSmsModal open={adding} onClose={() => setAdding(false)} />
+      <StatementImportModal open={importing} onClose={() => setImporting(false)} accounts={accounts} />
 
       <SmsConverterSheet
         smsId={convertingSmsId}
@@ -719,13 +748,6 @@ function AddSmsModal({ open, onClose }) {
   );
 }
 
-function matchAccountForSms(sms, accounts) {
-  return accounts.find((a) =>
-    (a.aliases ?? []).some((al) => aliasMatchesAccountNumber(al, sms.parsedData?.aliasGuess ?? '')) ||
-    (sms.parsedData?.aliasGuess && a.number && String(a.number).endsWith(sms.parsedData.aliasGuess.replace(/[X*]/g, '')))
-  );
-}
-
 function buildInitialFromSms(sms, matched) {
   const ts = sms.dateTime ?? sms.parsedData?.date ?? Date.now();
   return {
@@ -733,7 +755,7 @@ function buildInitialFromSms(sms, matched) {
     accountId: matched?.id ?? '',
     amount: sms.parsedData?.amount ? String(sms.parsedData.amount) : '',
     txnType: sms.parsedData?.txnType ?? 'debit',
-    description: '',
+    description: sms.parsedData?.description ?? '',
     tags: ''
   };
 }
@@ -782,6 +804,7 @@ function SmsConverterSheet({ smsId, pending, accounts, onClose, onChange }) {
       onClose={onClose}
       initial={initial}
       smsLink={current.id}
+      sourceKind={(current.kind ?? 'sms') === 'statement' ? 'statement' : 'sms'}
       smsText={current.rawSms}
       smsIndex={idx + 1}
       smsTotal={pending.length}
@@ -796,18 +819,29 @@ function SmsConverterSheet({ smsId, pending, accounts, onClose, onChange }) {
   );
 }
 
-function SmsRow({ sms, accounts, onConvert }) {
+function SmsRow({ sms, accounts, onConvert, isDuplicate }) {
   const matched = matchAccountForSms(sms, accounts);
+  const kind = sms.kind ?? 'sms';
   const dismiss = async () => {
     await db.smsQueue.update(sms.id, { status: 'dismissed' });
   };
   return (
-    <li className="p-3">
+    <li className={cn('p-3', isDuplicate && 'bg-warning/5')}>
       <div className="flex items-start gap-3">
-        <Wand2 className="w-4 h-4 mt-1 text-primary shrink-0" />
+        {kind === 'statement'
+          ? <FileText className="w-4 h-4 mt-1 text-primary shrink-0" />
+          : <Wand2 className="w-4 h-4 mt-1 text-primary shrink-0" />}
         <div className="flex-1 min-w-0">
           <p className="text-sm font-medium leading-snug break-words">{sms.rawSms}</p>
           <div className="mt-1.5 flex flex-wrap gap-1.5 text-xs">
+            {isDuplicate && (
+              <span className="fs-chip text-warning" title="A transaction with this account, date and amount already exists in your books">
+                ⚠ already in your books
+              </span>
+            )}
+            <span className="fs-chip text-[10px] uppercase tracking-wide text-muted-fg">
+              {kind === 'statement' ? 'Statement' : 'SMS'}
+            </span>
             {sms.parsedData?.amount && (
               <span className="fs-chip">₹ {formatINR(sms.parsedData.amount, { hidePaise: true }).replace('₹', '')}</span>
             )}
@@ -824,7 +858,17 @@ function SmsRow({ sms, accounts, onConvert }) {
         </button>
       </div>
       <div className="mt-2 flex justify-end gap-2">
-        <button className="fs-btn-primary text-xs px-3 py-1.5" onClick={() => onConvert(sms.id)}>Convert to transaction</button>
+        {isDuplicate && (
+          <button className="fs-btn-ghost text-xs px-3 py-1.5 text-warning" onClick={dismiss}>
+            Dismiss
+          </button>
+        )}
+        <button
+          className={cn('text-xs px-3 py-1.5', isDuplicate ? 'fs-btn-secondary' : 'fs-btn-primary')}
+          onClick={() => onConvert(sms.id)}
+        >
+          {isDuplicate ? 'Convert anyway' : 'Convert to transaction'}
+        </button>
       </div>
     </li>
   );

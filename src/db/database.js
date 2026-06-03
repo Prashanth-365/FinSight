@@ -27,6 +27,13 @@ db.version(4).stores({
   statements: '++id, accountId, importedAt, status'
 });
 
+db.version(5).stores({
+  // smsQueue doubles as the unified inbox of pending items: SMS-parsed AND
+  // statement-extracted rows. `kind` ('sms' | 'statement') distinguishes them;
+  // `accountId` is the resolved/known account (always set for statement rows).
+  smsQueue: '++id, status, dateTime, kind, accountId'
+});
+
 // re-number slNo across all transactions in chronological order.
 // Call after any insert/update/delete of transactions whose dateTime is non-trivial.
 export async function reindexSlNo() {
