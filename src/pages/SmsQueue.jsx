@@ -397,7 +397,7 @@ function parseSms(raw) {
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100, 'All'];
 
-export default function Inbox() {
+export default function InboxPage() {
   const queue = useLiveQuery(() => db.smsQueue.orderBy('dateTime').reverse().toArray(), [], []);
   const accounts = useLiveQuery(() => db.accounts.toArray(), [], []);
   const allTxns = useLiveQuery(() => db.transactions.toArray(), [], []);
