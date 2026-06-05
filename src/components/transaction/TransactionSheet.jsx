@@ -8,7 +8,7 @@ import { Combobox } from '@/components/ui/Combobox.jsx';
 import { Select } from '@/components/ui/Select.jsx';
 import { useProfile } from '@/context/ProfileContext.jsx';
 import { useToast } from '@/components/ui/Toast.jsx';
-import { freqSorted, todayLocalISO, maskNumber, getAccountBalance, inferInvestmentPlatform, txnFingerprint, uid } from '@/lib/utils.js';
+import { freqSorted, todayLocalISO, tsToLocalISO, maskNumber, getAccountBalance, inferInvestmentPlatform, txnFingerprint, uid } from '@/lib/utils.js';
 import { formatINR } from '@/lib/currency.js';
 import { ArrowDownLeft, ArrowUpRight, Users, ChevronLeft, ChevronRight, Trash2, Split, Plus, X } from 'lucide-react';
 import { Link } from 'react-router-dom';
@@ -26,6 +26,7 @@ const empty = (profileId) => ({
   description: '',
   tags: '',
   investmentName: '', // used only when category resolves to type='investment'
+  unitPrice: '',      // optional price per unit → logs an investment order
   split: false,
   splits: [] // [{ key, name, amount, isMe }]
 });
@@ -66,7 +67,7 @@ export function TransactionSheet({
         : null;
       setForm({
         id: editing.id,
-        dateTime: new Date(editing.dateTime).toISOString().slice(0, 16),
+        dateTime: tsToLocalISO(editing.dateTime),
         profileId: editing.profileId,
         accountId: editing.accountId ?? '',
         category: cat?.name ?? '',
@@ -75,7 +76,8 @@ export function TransactionSheet({
         txnType: editing.txnType ?? 'debit',
         description: editing.description ?? '',
         tags: (editing.tags ?? []).join(', '),
-        investmentName: linkedInv?.name ?? ''
+        investmentName: linkedInv?.name ?? '',
+        unitPrice: editing.unitPrice ? String(editing.unitPrice) : ''
       });
     } else {
       // Pick a sensible default profile:
@@ -318,6 +320,15 @@ export function TransactionSheet({
         investmentId = inv.id;
       }
 
+      // For investment buys/sells, optionally capture price per unit and derive
+      // units (amount ÷ price). These ride on the transaction, which IS the order.
+      let unitPrice = null;
+      let units = null;
+      if (investmentId && form.unitPrice) {
+        const p = Number(form.unitPrice);
+        if (isFinite(p) && p > 0) { unitPrice = p; units = amt / p; }
+      }
+
       const payload = {
         slNo: 0,
         dateTime,
@@ -332,6 +343,8 @@ export function TransactionSheet({
         tags,
         source: smsLink ? sourceKind : 'manual',
         investmentId,
+        unitPrice,
+        units,
         importFingerprint: txnFingerprint({
           accountId: Number(form.accountId),
           amount: amt,
@@ -613,6 +626,33 @@ export function TransactionSheet({
         </Field>
       )}
 
+      {isInvestmentCategory && !form.split && form.investmentName?.trim() && (
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Price per unit (₹)" hint="Optional — logs an order with units">
+            <input
+              inputMode="decimal"
+              className="fs-input"
+              placeholder="e.g. 72.45"
+              value={form.unitPrice}
+              onChange={(e) => setForm({ ...form, unitPrice: e.target.value })}
+            />
+          </Field>
+          <Field label="Units">
+            <input
+              className="fs-input bg-muted/40 text-muted-fg"
+              readOnly
+              tabIndex={-1}
+              placeholder="amount ÷ price"
+              value={
+                form.unitPrice && Number(form.unitPrice) > 0 && form.amount
+                  ? (Number(form.amount) / Number(form.unitPrice)).toLocaleString('en-IN', { maximumFractionDigits: 4 })
+                  : ''
+              }
+            />
+          </Field>
+        </div>
+      )}
+
       <Field label="Description">
         <Combobox
           value={form.description}
@@ -627,6 +667,7 @@ export function TransactionSheet({
           value={form.tags}
           onChange={(v) => setForm({ ...form, tags: v })}
           suggestions={tagSuggestions}
+          separator=","
           placeholder="vacation, work…"
         />
       </Field>

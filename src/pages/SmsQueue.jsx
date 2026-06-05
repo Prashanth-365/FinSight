@@ -404,6 +404,7 @@ export default function InboxPage() {
   const { info } = useToast();
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [viewing, setViewing] = useState(null);
 
   const [showDismissed, setShowDismissed] = useState(false);
   const [pageSize, setPageSize] = useState(50);
@@ -569,7 +570,13 @@ export default function InboxPage() {
             <ul className="divide-y divide-border">
               {dismissed.slice(0, 100).map((sms) => (
                 <li key={sms.id} className="p-3 text-sm flex items-center gap-2">
-                  <span className="truncate text-muted-fg flex-1">{sms.rawSms.slice(0, 80)}…</span>
+                  <button
+                    className="truncate text-muted-fg flex-1 text-left hover:text-foreground"
+                    title="View full details"
+                    onClick={() => setViewing(sms)}
+                  >
+                    {sms.rawSms.slice(0, 80)}…
+                  </button>
                   <button
                     className="fs-btn-ghost text-xs"
                     title="Restore to pending"
@@ -600,7 +607,13 @@ export default function InboxPage() {
           <ul className="divide-y divide-border">
             {processed.slice(0, 30).map((sms) => (
               <li key={sms.id} className="p-3 text-sm flex items-center justify-between">
-                <span className="truncate text-muted-fg">{sms.rawSms.slice(0, 70)}…</span>
+                <button
+                  className="truncate text-muted-fg flex-1 text-left hover:text-foreground"
+                  title="View full details"
+                  onClick={() => setViewing(sms)}
+                >
+                  {sms.rawSms.slice(0, 70)}…
+                </button>
                 <button
                   className="text-xs text-danger ml-2"
                   onClick={() => db.smsQueue.delete(sms.id)}
@@ -615,6 +628,7 @@ export default function InboxPage() {
 
       <AddSmsModal open={adding} onClose={() => setAdding(false)} />
       <StatementImportModal open={importing} onClose={() => setImporting(false)} accounts={accounts} />
+      <InboxItemDetailModal item={viewing} accounts={accounts} onClose={() => setViewing(null)} />
 
       <SmsConverterSheet
         smsId={convertingSmsId}
@@ -755,7 +769,7 @@ function buildInitialFromSms(sms, matched) {
     accountId: matched?.id ?? '',
     amount: sms.parsedData?.amount ? String(sms.parsedData.amount) : '',
     txnType: sms.parsedData?.txnType ?? 'debit',
-    description: sms.parsedData?.description ?? '',
+    description: '',
     tags: ''
   };
 }
@@ -871,6 +885,40 @@ function SmsRow({ sms, accounts, onConvert, isDuplicate }) {
         </button>
       </div>
     </li>
+  );
+}
+
+// Read-only full-detail view for a dismissed/processed inbox item.
+function InboxItemDetailModal({ item, accounts, onClose }) {
+  if (!item) return null;
+  const kind = item.kind ?? 'sms';
+  const matched = matchAccountForSms(item, accounts ?? []);
+  return (
+    <Modal
+      open={!!item}
+      onClose={onClose}
+      title={kind === 'statement' ? 'Statement transaction' : 'SMS details'}
+      footer={<button className="fs-btn-primary" onClick={onClose}>Close</button>}
+    >
+      <div className="rounded-xl border border-border bg-elevated p-3">
+        <p className="text-sm whitespace-pre-wrap break-words">{item.rawSms}</p>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-1.5 text-xs">
+        <span className="fs-chip uppercase text-muted-fg">{kind === 'statement' ? 'Statement' : 'SMS'}</span>
+        <span className="fs-chip uppercase text-muted-fg">{item.status}</span>
+        {item.parsedData?.amount && (
+          <span className="fs-chip">₹ {formatINR(item.parsedData.amount, { hidePaise: true }).replace('₹', '')}</span>
+        )}
+        {item.parsedData?.txnType && (
+          <span className={`fs-chip ${item.parsedData.txnType === 'credit' ? 'text-success' : 'text-danger'}`}>
+            {item.parsedData.txnType}
+          </span>
+        )}
+        {item.parsedData?.aliasGuess && <span className="fs-chip">{item.parsedData.aliasGuess}</span>}
+        <span className="fs-chip">{fmtDateTime(item.dateTime ?? item.parsedData?.date)}</span>
+        {matched && <span className="fs-chip text-primary">→ {matched.name}</span>}
+      </div>
+    </Modal>
   );
 }
 

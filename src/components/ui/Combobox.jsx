@@ -16,7 +16,8 @@ export function Combobox({
   className,
   allowFreeText = true,
   emptyHint = 'Type to add a new value',
-  renderItem
+  renderItem,
+  separator = null // when set (e.g. ','), filter & commit on the LAST token only
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState(value || '');
@@ -32,14 +33,34 @@ export function Combobox({
     return () => window.removeEventListener('mousedown', h);
   }, []);
 
+  // In separator mode, suggestions match the text AFTER the last separator.
+  const activeToken = useMemo(() => {
+    if (!separator) return (query || '').trim();
+    const parts = (query || '').split(separator);
+    return (parts[parts.length - 1] || '').trim();
+  }, [query, separator]);
+
   const filtered = useMemo(() => {
-    const q = (query || '').toLowerCase().trim();
+    const q = activeToken.toLowerCase();
     const items = suggestions.map((s) => (typeof s === 'string' ? { value: s, label: s } : s));
     if (!q) return items.slice(0, 50);
     return items.filter((i) => i.label.toLowerCase().includes(q)).slice(0, 50);
-  }, [suggestions, query]);
+  }, [suggestions, activeToken]);
 
   const commit = (val) => {
+    if (separator) {
+      // Replace only the last token (preserving any space after the comma), then
+      // leave a trailing separator so the next token can be typed or picked.
+      const parts = (query || '').split(separator);
+      const lead = parts[parts.length - 1].match(/^\s*/)[0];
+      parts[parts.length - 1] = lead + val;
+      const next = parts.join(separator) + separator + ' ';
+      onChange?.(next);
+      setQuery(next);
+      setHighlight(0);
+      setOpen(true);
+      return;
+    }
     onChange?.(val);
     setQuery(val);
     setOpen(false);
@@ -100,7 +121,7 @@ export function Combobox({
               >
                 <span className="flex-1 truncate">{renderItem ? renderItem(item) : item.label}</span>
                 {item.hint && <span className="text-xs text-muted-fg">{item.hint}</span>}
-                {query === item.value && <Check className="w-4 h-4 text-primary" />}
+                {activeToken === item.value && <Check className="w-4 h-4 text-primary" />}
               </button>
             ))
           )}

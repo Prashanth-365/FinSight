@@ -191,6 +191,16 @@ function HoldingDetail({ holding, onBack, onEdit }) {
     [holding.id]
   );
 
+  // Orders = transactions linked to this holding (each investment txn is an order).
+  const orders = useLiveQuery(
+    () => db.transactions.where('investmentId').equals(holding.id).toArray(),
+    [holding.id], []
+  );
+  const sortedOrders = useMemo(
+    () => [...(orders ?? [])].sort((a, b) => (b.dateTime ?? 0) - (a.dateTime ?? 0)),
+    [orders]
+  );
+
   const refresh = async () => {
     setBusy(true);
     try {
@@ -313,6 +323,38 @@ function HoldingDetail({ holding, onBack, onEdit }) {
               </ResponsiveContainer>
             </div>
           </CardBody>
+        </Card>
+      )}
+
+      {sortedOrders.length > 0 && (
+        <Card>
+          <div className="px-4 py-2 border-b border-border">
+            <span className="text-xs font-semibold text-muted-fg uppercase tracking-wider">
+              Orders ({sortedOrders.length})
+            </span>
+          </div>
+          <ul className="divide-y divide-border">
+            {sortedOrders.map((o) => (
+              <li key={o.id} className="flex items-center justify-between px-4 py-2.5 text-sm gap-3">
+                <div className="min-w-0">
+                  <p className="font-medium">
+                    <span className={o.txnType === 'credit' ? 'text-danger' : 'text-success'}>
+                      {o.txnType === 'credit' ? 'Sell' : 'Buy'}
+                    </span>
+                    {o.units ? (
+                      <span className="text-muted-fg">
+                        {' · '}{Number(o.units).toLocaleString('en-IN', { maximumFractionDigits: 4 })} units
+                      </span>
+                    ) : null}
+                  </p>
+                  <p className="text-[11px] text-muted-fg">
+                    {fmtDate(o.dateTime)}{o.unitPrice ? ` · @ ${formatINR(o.unitPrice, { hidePaise: true })}` : ''}
+                  </p>
+                </div>
+                <p className="font-semibold tabular-nums shrink-0">{formatINR(o.amount, { hidePaise: true })}</p>
+              </li>
+            ))}
+          </ul>
         </Card>
       )}
 
