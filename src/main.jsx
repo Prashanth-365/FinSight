@@ -7,6 +7,7 @@ import { ToastProvider } from '@/components/ui/Toast.jsx';
 import { ThemeProvider } from '@/context/ThemeContext.jsx';
 import { AuthProvider } from '@/context/AuthContext.jsx';
 import { ProfileProvider } from '@/context/ProfileContext.jsx';
+import { NavProvider } from '@/context/NavContext.jsx';
 import { ErrorBoundary } from '@/components/ErrorBoundary.jsx';
 
 createRoot(document.getElementById('root')).render(
@@ -17,7 +18,9 @@ createRoot(document.getElementById('root')).render(
           <ToastProvider>
             <AuthProvider>
               <ProfileProvider>
-                <App />
+                <NavProvider>
+                  <App />
+                </NavProvider>
               </ProfileProvider>
             </AuthProvider>
           </ToastProvider>

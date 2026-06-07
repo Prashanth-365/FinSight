@@ -31,6 +31,14 @@ const empty = (profileId) => ({
   splits: [] // [{ key, name, amount, isMe }]
 });
 
+// Split a total into `count` equal shares (computed in paise), summing back to exactly total.
+function equalShares(total, count) {
+  const cents = Math.round((Number(total) || 0) * 100);
+  const base = Math.floor(cents / count);
+  const rem = cents - base * count;
+  return Array.from({ length: count }, (_, i) => (base + (i < rem ? 1 : 0)) / 100);
+}
+
 export function TransactionSheet({
   open,
   onClose,
@@ -114,6 +122,13 @@ export function TransactionSheet({
   const tagSuggestions = useMemo(() => freqSorted(allTxns.flatMap((t) => t.tags ?? [])), [allTxns]);
   const descSuggestions = useMemo(() => freqSorted(allTxns.map((t) => t.description).filter(Boolean)), [allTxns]);
 
+  // Names to suggest while splitting: profiles + anyone you've logged under Transfer.
+  const splitNameSuggestions = useMemo(() => {
+    const transfer = categories.find((c) => c.parentId == null && c.name?.toLowerCase() === 'transfer');
+    const kids = transfer ? categories.filter((c) => c.parentId === transfer.id).map((c) => c.name) : [];
+    return Array.from(new Set([...profiles.map((p) => p.name), ...kids].filter(Boolean)));
+  }, [categories, profiles]);
+
   const selectedAccount = accounts.find((a) => a.id === Number(form.accountId));
 
   // Is the typed category an "investment" type? Two signals:
@@ -172,7 +187,11 @@ export function TransactionSheet({
       description: form.description
     });
     const splitGroupId = uid('split_');
-    const desc = form.description ?? '';
+    // Your own share keeps your description; everyone else's transaction records what
+    // the spend was, e.g. "Food & Dining - Snacks - Ice Cream".
+    const myDesc = form.description ?? '';
+    const otherDesc = [form.category, form.subCategory, form.description]
+      .map((s) => (s || '').trim()).filter(Boolean).join(' - ');
 
     const payloads = [];
     for (const s of rows) {
@@ -195,7 +214,7 @@ export function TransactionSheet({
         amount: s.amount,
         txnType: form.txnType,
         paymentMode: selectedAccount?.type ?? 'bank',
-        description: desc,
+        description: s.isMe ? myDesc : otherDesc,
         tags,
         source: smsLink ? sourceKind : 'manual',
         investmentId: null,
@@ -224,14 +243,16 @@ export function TransactionSheet({
 
   const toggleSplit = (on) => {
     if (on) {
-      // seed with a "Me" row carrying the current amount, plus a blank person row
+      // seed a "Me" row + a blank person, splitting the current amount equally
       const meName = profiles.find((p) => p.id === Number(form.profileId))?.name ?? 'Me';
+      const total = Number(form.amount) || 0;
+      const shares = total > 0 ? equalShares(total, 2) : ['', ''];
       setForm((f) => ({
         ...f,
         split: true,
         splits: [
-          { key: uid('s_'), name: meName, amount: f.amount || '', isMe: true },
-          { key: uid('s_'), name: '', amount: '', isMe: false }
+          { key: uid('s_'), name: meName, amount: shares[0], isMe: true },
+          { key: uid('s_'), name: '', amount: shares[1], isMe: false }
         ]
       }));
     } else {
@@ -554,6 +575,7 @@ export function TransactionSheet({
         <SplitPanel
           splits={form.splits}
           profiles={profiles}
+          nameSuggestions={splitNameSuggestions}
           activeProfileId={form.profileId}
           total={splitTotal}
           onChange={(splits) => setForm((f) => ({ ...f, splits }))}
@@ -679,14 +701,20 @@ function typeBadge(t) {
   return t === 'card' ? '💳' : t === 'wallet' ? '👛' : '🏦';
 }
 
-function SplitPanel({ splits, profiles, activeProfileId, total, onChange }) {
+function SplitPanel({ splits, profiles, nameSuggestions, activeProfileId, total, onChange }) {
   const update = (key, patch) => onChange(splits.map((s) => (s.key === key ? { ...s, ...patch } : s)));
   const remove = (key) => onChange(splits.filter((s) => s.key !== key));
-  const add = () => onChange([...splits, { key: uid('s_'), name: '', amount: '', isMe: false }]);
+  // Adding a person re-splits the current total equally across everyone.
+  const add = () => {
+    const rows = [...splits, { key: uid('s_'), name: '', amount: '', isMe: false }];
+    const sum = rows.reduce((acc, r) => acc + (Number(r.amount) || 0), 0);
+    const shares = equalShares(sum, rows.length);
+    onChange(rows.map((r, i) => ({ ...r, amount: shares[i] })));
+  };
   // Only one row can be "me"; choosing a new me clears the rest.
   const setMe = (key) => onChange(splits.map((s) => ({ ...s, isMe: s.key === key })));
 
-  const profileNames = profiles.map((p) => p.name);
+  const names = nameSuggestions ?? profiles.map((p) => p.name);
 
   return (
     <div className="mb-3 rounded-xl border border-border bg-elevated/60 p-3 space-y-2">
@@ -736,7 +764,7 @@ function SplitPanel({ splits, profiles, activeProfileId, total, onChange }) {
       ))}
 
       <datalist id="fs-split-names">
-        {profileNames.map((n) => <option key={n} value={n} />)}
+        {names.map((n) => <option key={n} value={n} />)}
       </datalist>
 
       <button type="button" onClick={add} className="fs-btn-ghost text-xs w-full justify-center">

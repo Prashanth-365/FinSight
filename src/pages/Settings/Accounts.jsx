@@ -154,9 +154,12 @@ function AccountEditor({ open, onClose, editing, profiles }) {
   };
 
   const setBalance = (profileId, raw) => {
+    // Keep the raw string while typing so a "-" or a trailing "." isn't stripped by
+    // Number() mid-edit (that was blocking negative and decimal entry). The save
+    // handler coerces to a number.
     setForm((f) => ({
       ...f,
-      balances: { ...f.balances, [String(profileId)]: raw === '' ? '' : Number(raw) }
+      balances: { ...f.balances, [String(profileId)]: raw }
     }));
   };
 
@@ -174,8 +177,8 @@ function AccountEditor({ open, onClose, editing, profiles }) {
       // Coerce balances to numbers, only for currently selected profiles
       const balances = {};
       for (const pid of form.profileIds) {
-        const raw = form.balances[String(pid)];
-        balances[String(pid)] = raw === '' || raw == null ? 0 : Number(raw);
+        const n = Number(form.balances[String(pid)]);
+        balances[String(pid)] = isFinite(n) ? n : 0;
       }
       const payload = {
         name: form.name.trim(),

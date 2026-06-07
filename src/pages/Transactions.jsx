@@ -7,6 +7,7 @@ import { Card } from '@/components/ui/Card.jsx';
 import { Select } from '@/components/ui/Select.jsx';
 import { Avatar } from '@/components/ui/Avatar.jsx';
 import { Sheet, Modal, ConfirmDialog } from '@/components/ui/Modal.jsx';
+import { useBackHandler } from '@/context/NavContext.jsx';
 import { Field } from '@/components/ui/Input.jsx';
 import { Combobox } from '@/components/ui/Combobox.jsx';
 import { TransactionSheet } from '@/components/transaction/TransactionSheet.jsx';
@@ -104,6 +105,8 @@ export default function Transactions() {
     setSelectionMode(false);
     setSelected(new Set());
   };
+  // Android back exits selection mode before doing anything else.
+  useBackHandler(selectionMode, exitSelection);
 
   const deleteSelected = async () => {
     const ids = [...selected];

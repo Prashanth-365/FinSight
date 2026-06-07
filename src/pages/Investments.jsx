@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { formatINR, formatINRShort, formatPercent } from '@/lib/currency.js';
 import { cn, fmtDate } from '@/lib/utils.js';
+import { useBackHandler } from '@/context/NavContext.jsx';
 import { fetchMfNav, fetchCryptoPriceINR, fetchStockPriceINR, fdProjection } from '@/lib/pricing.js';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 
@@ -28,6 +29,40 @@ const PLATFORMS = [
   { key: 'Other', label: 'Other', icon: '✨', color: '#94a3b8' }
 ];
 
+// Platforms we can fetch a live value for.
+const REFRESHABLE = ['MF', 'Stock', 'Crypto', 'FD', 'PPF', 'EPF'];
+
+// Fetch the latest value for a holding → a number (new currentValue) or null if
+// no live price is available. Never throws.
+async function refreshHoldingValue(holding, apiKey) {
+  try {
+    const units = Number(holding.units ?? 0);
+    if (holding.platform === 'MF') {
+      const nav = await fetchMfNav(holding.identifier);
+      return nav == null ? null : (units > 0 ? nav * units : nav);
+    }
+    if (holding.platform === 'Crypto') {
+      const p = await fetchCryptoPriceINR(holding.identifier);
+      return p == null ? null : (units > 0 ? p * units : p);
+    }
+    if (holding.platform === 'Stock') {
+      const p = await fetchStockPriceINR(holding.identifier, apiKey);
+      return p == null ? null : (units > 0 ? p * units : p);
+    }
+    if (['FD', 'PPF', 'EPF'].includes(holding.platform)) {
+      const rate = holding.notes?.match(/(\d+(?:\.\d+)?)\s*%/)?.[1];
+      return fdProjection({
+        principal: holding.investedAmount,
+        ratePct: rate ? Number(rate) : 7,
+        startDate: holding.startDate
+      });
+    }
+  } catch {
+    /* fall through to null */
+  }
+  return null;
+}
+
 export default function Investments() {
   const { isMasterView, activeProfileId } = useProfile();
   const investments = useLiveQuery(() => db.investments.toArray(), [], []);
@@ -37,23 +72,57 @@ export default function Investments() {
     return investments.filter((i) => i.profileId === activeProfileId);
   }, [investments, isMasterView, activeProfileId]);
 
+  const { success, error } = useToast();
   const [platform, setPlatform] = useState(null);
-  const [holding, setHolding] = useState(null);
+  const [holdingId, setHoldingId] = useState(null);
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [busyAll, setBusyAll] = useState(false);
+
+  // Derive the open holding from the live list so refreshes/edits show instantly.
+  const holding = useMemo(
+    () => (holdingId != null ? investments.find((i) => i.id === holdingId) ?? null : null),
+    [investments, holdingId]
+  );
+
+  // Android back: holding view → platform list → grid. (Modals self-register and
+  // close before these, since they're pushed onto the stack later.)
+  useBackHandler(!!holding, () => setHoldingId(null));
+  useBackHandler(!holding && !!platform, () => setPlatform(null));
 
   if (holding) {
-    return <HoldingDetail holding={holding} onBack={() => setHolding(null)} onEdit={() => { setEditing(holding); setHolding(null); }} />;
+    return <HoldingDetail holding={holding} onBack={() => setHoldingId(null)} onEdit={() => { setEditing(holding); setHoldingId(null); }} />;
   }
 
   if (platform) {
     const list = filtered.filter((i) => i.platform === platform.key);
+    const canRefresh = REFRESHABLE.includes(platform.key);
+    const refreshAll = async () => {
+      setBusyAll(true);
+      const apiKey = await getSetting('alphavantage.key', '');
+      let ok = 0, fail = 0;
+      for (const inv of list) {
+        const v = await refreshHoldingValue(inv, apiKey);
+        if (v != null) { await db.investments.update(inv.id, { currentValue: v }); ok++; }
+        else fail++;
+      }
+      setBusyAll(false);
+      if (ok) success(`Refreshed ${ok}${fail ? `, ${fail} need a manual update` : ''}`);
+      else error('Could not fetch live prices — check the IDs or update manually.');
+    };
     return (
       <div className="space-y-3 animate-fade-in">
         <div className="flex items-center gap-2">
           <button onClick={() => setPlatform(null)} className="fs-btn-ghost"><ChevronLeft className="w-4 h-4" /> Back</button>
           <h1 className="text-lg font-semibold">{platform.icon} {platform.label}</h1>
-          <button onClick={() => setAdding(true)} className="fs-btn-primary ml-auto"><Plus className="w-4 h-4" /> Add</button>
+          <div className="ml-auto flex gap-2">
+            {canRefresh && list.length > 0 && (
+              <button onClick={refreshAll} disabled={busyAll} className="fs-btn-secondary">
+                <RefreshCw className={cn('w-4 h-4', busyAll && 'animate-spin')} /> {busyAll ? 'Refreshing…' : 'Refresh all'}
+              </button>
+            )}
+            <button onClick={() => setAdding(true)} className="fs-btn-primary"><Plus className="w-4 h-4" /> Add</button>
+          </div>
         </div>
         {list.length === 0 ? (
           <Card><div className="p-2">
@@ -66,7 +135,7 @@ export default function Investments() {
           </div></Card>
         ) : (
           <ul className="space-y-2">
-            {list.map((inv) => <HoldingRow key={inv.id} inv={inv} onClick={() => setHolding(inv)} />)}
+            {list.map((inv) => <HoldingRow key={inv.id} inv={inv} onClick={() => setHoldingId(inv.id)} />)}
           </ul>
         )}
         <InvestmentForm
@@ -185,6 +254,8 @@ function HoldingDetail({ holding, onBack, onEdit }) {
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [recordPayment, setRecordPayment] = useState(false);
+  const [editPrice, setEditPrice] = useState(false);
+  const [priceDraft, setPriceDraft] = useState('');
 
   const chit = useLiveQuery(
     () => holding.platform === 'Chit' ? db.chitFunds.where({ investmentId: holding.id }).first() : null,
@@ -204,35 +275,13 @@ function HoldingDetail({ holding, onBack, onEdit }) {
   const refresh = async () => {
     setBusy(true);
     try {
-      let nav = null;
       const apiKey = await getSetting('alphavantage.key', '');
-      if (holding.platform === 'MF') nav = await fetchMfNav(holding.identifier);
-      else if (holding.platform === 'Crypto') nav = await fetchCryptoPriceINR(holding.identifier);
-      else if (holding.platform === 'Stock') nav = await fetchStockPriceINR(holding.identifier, apiKey);
-      else if (holding.platform === 'FD' || holding.platform === 'PPF' || holding.platform === 'EPF') {
-        const proj = fdProjection({
-          principal: holding.investedAmount,
-          ratePct: holding.notes?.match(/(\d+(?:\.\d+)?)\s*%/)?.[1] ? Number(holding.notes.match(/(\d+(?:\.\d+)?)\s*%/)[1]) : 7,
-          startDate: holding.startDate
-        });
-        if (proj) {
-          await db.investments.update(holding.id, { currentValue: proj });
-          success('Projection updated');
-        } else {
-          error('Could not project value — please add rate as "7%" in notes.');
-        }
-        setBusy(false);
-        return;
-      }
-
-      if (nav && holding.units) {
-        await db.investments.update(holding.id, { currentValue: Number(nav) * Number(holding.units) });
-        success('Refreshed');
-      } else if (nav) {
-        await db.investments.update(holding.id, { currentValue: Number(nav) });
+      const v = await refreshHoldingValue(holding, apiKey);
+      if (v != null) {
+        await db.investments.update(holding.id, { currentValue: v });
         success('Refreshed');
       } else {
-        error('Could not fetch live price — please update manually.');
+        error('Could not fetch a live price — check the ID, or set the price manually below.');
       }
     } catch (e) {
       error(e.message);
@@ -252,6 +301,16 @@ function HoldingDetail({ holding, onBack, onEdit }) {
   const cur = Number(holding.currentValue ?? invested);
   const pnl = cur - invested;
   const pct = invested > 0 ? (pnl / invested) * 100 : 0;
+
+  const units = Number(holding.units ?? 0);
+  const unitPrice = units > 0 ? cur / units : null;
+  const savePrice = async () => {
+    const p = Number(priceDraft);
+    if (!isFinite(p) || p < 0) { error('Enter a valid price'); return; }
+    await db.investments.update(holding.id, { currentValue: p * units });
+    setEditPrice(false);
+    success('Price updated');
+  };
 
   // simple value-over-time chart: invested vs current at startDate vs today.
   const chartData = useMemo(() => {
@@ -294,6 +353,33 @@ function HoldingDetail({ holding, onBack, onEdit }) {
           {holding.startDate && <Stat label="Started" value={fmtDate(holding.startDate)} />}
           {holding.maturityDate && <Stat label="Matures" value={fmtDate(holding.maturityDate)} />}
         </CardBody>
+        {units > 0 && (
+          <div className="px-4 pb-2 flex items-center justify-between gap-2 text-sm">
+            <span className="text-muted-fg">Price / NAV per unit</span>
+            {editPrice ? (
+              <span className="flex items-center gap-1.5">
+                <input
+                  inputMode="decimal"
+                  autoFocus
+                  className="fs-input w-28 py-1 text-right"
+                  value={priceDraft}
+                  onChange={(e) => setPriceDraft(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') savePrice(); if (e.key === 'Escape') setEditPrice(false); }}
+                />
+                <button className="fs-btn-secondary text-xs px-2 py-1" onClick={savePrice}>Save</button>
+                <button className="fs-btn-ghost text-xs px-2 py-1" onClick={() => setEditPrice(false)}>Cancel</button>
+              </span>
+            ) : (
+              <button
+                className="font-semibold tabular-nums inline-flex items-center gap-1.5 hover:text-primary"
+                onClick={() => { setPriceDraft(unitPrice != null ? String(Number(unitPrice.toFixed(4))) : ''); setEditPrice(true); }}
+                title="Tap to edit — updates current value as price × units"
+              >
+                {unitPrice != null ? formatINR(unitPrice) : '—'} <Edit3 className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        )}
         <div className="px-4 pb-4 flex gap-2">
           <button onClick={refresh} disabled={busy} className="fs-btn-secondary">
             <RefreshCw className={cn('w-4 h-4', busy && 'animate-spin')} /> Refresh value
@@ -596,7 +682,10 @@ function InvestmentForm({ open, onClose, platform, editing }) {
         <Field label="Name">
           <input className="fs-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Axis Bluechip" />
         </Field>
-        <Field label={platform === 'MF' ? 'AMFI scheme code' : platform === 'Stock' ? 'Ticker (e.g. RELIANCE.BSE)' : platform === 'Crypto' ? 'CoinGecko id (e.g. bitcoin)' : 'Identifier / folio'}>
+        <Field
+          label={platform === 'MF' ? 'AMFI scheme code' : platform === 'Stock' ? 'Ticker (e.g. RELIANCE.BSE)' : platform === 'Crypto' ? 'CoinGecko id (e.g. bitcoin)' : 'Identifier / folio'}
+          hint={platform === 'MF' ? 'From api.mfapi.in/mf/search?q=NAME — the schemeCode number' : platform === 'Stock' ? 'TICKER.BSE or .NSE; needs an Alpha Vantage key in Preferences' : platform === 'Crypto' ? 'CoinGecko coin id, e.g. bitcoin, ethereum' : 'Used to fetch live prices'}
+        >
           <input className="fs-input" value={form.identifier} onChange={(e) => setForm({ ...form, identifier: e.target.value })} placeholder="Optional" />
         </Field>
         {(platform === 'MF' || platform === 'Stock' || platform === 'Crypto' || platform === 'Gold') && (

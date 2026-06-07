@@ -299,6 +299,10 @@ const SPAM_RE = new RegExp(
 
 const DEBIT_WORDS = /\b(debited|spent|withdrawn|withdrawal|paid|sent|purchase|charged|payment)\b/i;
 const CREDIT_WORDS = /\b(credited|received|deposited|refund|cashback|salary|credit)\b/i;
+// "Strong" verbs name the actual action and outrank softer nouns like
+// "payment"/"purchase" — e.g. "Online Payment ... was credited to your card" is a CREDIT.
+const STRONG_DEBIT = /\b(debited|withdrawn|withdrawal|spent)\b/i;
+const STRONG_CREDIT = /\b(credited|deposited|refunded|refund)\b/i;
 
 // Parse a single "DD MMM YYYY HH:MM (AM|PM)?" style date if present.
 function parseLooseDate(text) {
@@ -369,18 +373,26 @@ function parseSms(raw) {
   const idx = best.index ?? 0;
   const near = text.slice(Math.max(0, idx - 40), Math.min(text.length, idx + best[0].length + 40));
   let txnType;
-  if (CREDIT_WORDS.test(near) && !DEBIT_WORDS.test(near)) txnType = 'credit';
+  const sC = STRONG_CREDIT.test(near), sD = STRONG_DEBIT.test(near);
+  if (sC && !sD) txnType = 'credit';            // "credited" beats a nearby "payment"
+  else if (sD && !sC) txnType = 'debit';
+  else if (CREDIT_WORDS.test(near) && !DEBIT_WORDS.test(near)) txnType = 'credit';
   else if (DEBIT_WORDS.test(near) && !CREDIT_WORDS.test(near)) txnType = 'debit';
   else {
-    // ambiguous near the amount — fall back to whichever verb appears first in the whole body
-    const cIdx = text.search(CREDIT_WORDS);
-    const dIdx = text.search(DEBIT_WORDS);
-    if (cIdx === -1 && dIdx === -1) {
-      return { amount, txnType: null, aliasGuess: null, date: Date.now(), rejectedAs: 'no-verb' };
+    // ambiguous near the amount — prefer a strong verb anywhere, else the first verb in the body
+    const scIdx = text.search(STRONG_CREDIT), sdIdx = text.search(STRONG_DEBIT);
+    if (scIdx !== -1 && (sdIdx === -1 || scIdx < sdIdx)) txnType = 'credit';
+    else if (sdIdx !== -1 && (scIdx === -1 || sdIdx < scIdx)) txnType = 'debit';
+    else {
+      const cIdx = text.search(CREDIT_WORDS);
+      const dIdx = text.search(DEBIT_WORDS);
+      if (cIdx === -1 && dIdx === -1) {
+        return { amount, txnType: null, aliasGuess: null, date: Date.now(), rejectedAs: 'no-verb' };
+      }
+      if (cIdx === -1) txnType = 'debit';
+      else if (dIdx === -1) txnType = 'credit';
+      else txnType = cIdx < dIdx ? 'credit' : 'debit';
     }
-    if (cIdx === -1) txnType = 'debit';
-    else if (dIdx === -1) txnType = 'credit';
-    else txnType = cIdx < dIdx ? 'credit' : 'debit';
   }
 
   // Account hint

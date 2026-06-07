@@ -37,6 +37,7 @@ function detectBank(text) {
   if (t.includes('axis bank')) return 'AXIS';
   if (t.includes('kotak')) return 'KOTAK';
   if (t.includes('karnataka bank')) return 'KBL';
+  if (t.includes('slice')) return 'SLICE';
   return 'GENERIC';
 }
 
@@ -44,14 +45,25 @@ function detectBank(text) {
 //   <date> <description...> <amount> [<balance>]
 // possibly with a Cr/Dr marker. We extract the leading date, trailing numbers,
 // and treat the middle as the description.
-const LEADING_DATE = /^(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|\d{1,2}[-\s][A-Za-z]{3,}[-\s]\d{2,4})/;
-const MONEY = /(?:₹|rs\.?|inr)?\s*([0-9][0-9,]*\.\d{2})(?:\s*(cr|dr))?/gi;
+// Optional leading serial number (Kotak prints a "#" column), then a date in
+// DD/MM/YYYY, DD-MMM-YYYY, or "DD MMM 'YY" form (slice uses an apostrophe year).
+const LEADING_DATE = /^(?:\d{1,3}\s+)?(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|\d{1,2}[-\s][A-Za-z]{3,}[-\s]['’]?\d{2,4})/;
+// Money may carry a leading minus (slice marks debits as "-₹5.00") and/or a Cr/Dr tag.
+const MONEY = /(-)?\s*(?:₹|rs\.?|inr)?\s*([0-9][0-9,]*\.\d{2})(?:\s*(cr|dr))?/gi;
 
 function parseGenericLines(lines) {
   const out = [];
   let prevBalance = null;
 
   for (const line of lines) {
+    // Seed the running balance from an "Opening Balance" row so even the first
+    // transaction can infer its direction (needed by tabular PDFs like Kotak).
+    const obIdx = line.toLowerCase().indexOf('opening balance');
+    if (obIdx !== -1) {
+      const ms = [...line.matchAll(MONEY)].filter((mm) => (mm.index ?? 0) >= obIdx);
+      if (ms.length) { prevBalance = parseAmount(ms[0][2]); continue; }
+    }
+
     const dm = line.match(LEADING_DATE);
     if (!dm) continue;
     const date = parseStmtDate(dm[1]);
@@ -60,27 +72,28 @@ function parseGenericLines(lines) {
     const monies = [...line.matchAll(MONEY)];
     if (monies.length === 0) continue;
 
-    // Heuristics:
-    //  - If the last two numbers look like (amount, balance), use them.
-    //  - Cr/Dr marker on the amount sets direction; otherwise infer from the
-    //    running balance change.
-    let amount = null, txnType = null, balance = null, marker = null;
+    // Heuristics (priority): explicit Cr/Dr tag → leading minus sign → running
+    // balance change → keyword. Money groups: [1]=sign, [2]=number, [3]=cr/dr.
+    let amount = null, txnType = null, balance = null, marker = null, neg = false;
 
     if (monies.length >= 2) {
       const amt = monies[monies.length - 2];
       const bal = monies[monies.length - 1];
-      amount = parseAmount(amt[1]);
-      marker = amt[2]?.toLowerCase() ?? null;
-      balance = parseAmount(bal[1]);
+      amount = parseAmount(amt[2]);
+      neg = !!amt[1];
+      marker = amt[3]?.toLowerCase() ?? null;
+      balance = parseAmount(bal[2]);
     } else {
       const amt = monies[monies.length - 1];
-      amount = parseAmount(amt[1]);
-      marker = amt[2]?.toLowerCase() ?? null;
+      amount = parseAmount(amt[2]);
+      neg = !!amt[1];
+      marker = amt[3]?.toLowerCase() ?? null;
     }
     if (!amount) continue;
 
     if (marker === 'cr') txnType = 'credit';
     else if (marker === 'dr') txnType = 'debit';
+    else if (neg) txnType = 'debit';
     else if (balance != null && prevBalance != null) {
       txnType = balance >= prevBalance ? 'credit' : 'debit';
     } else {
@@ -89,9 +102,8 @@ function parseGenericLines(lines) {
     }
     if (balance != null) prevBalance = balance;
 
-    // description = the line minus the leading date and the trailing money tokens
+    // description = the line minus the leading date/serial and the money tokens
     let desc = line.slice(dm[0].length);
-    // remove the matched money substrings from the tail
     for (const mm of monies) desc = desc.replace(mm[0], ' ');
     desc = cleanDescription(desc);
 

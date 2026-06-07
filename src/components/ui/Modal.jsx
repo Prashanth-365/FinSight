@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import { cn } from '@/lib/utils.js';
+import { useBackHandler } from '@/context/NavContext.jsx';
 
 // Generic modal (centered card) and Sheet (bottom drawer on mobile, side panel on desktop)
 export function Modal({ open, onClose, title, children, footer, size = 'md' }) {
@@ -16,6 +17,7 @@ export function Modal({ open, onClose, title, children, footer, size = 'md' }) {
       document.body.style.overflow = '';
     };
   }, [open, onClose]);
+  useBackHandler(!!open, () => onClose?.());
 
   if (!open) return null;
   const widthCls = size === 'sm' ? 'max-w-sm' : size === 'lg' ? 'max-w-2xl' : 'max-w-md';
@@ -52,6 +54,7 @@ export function Sheet({ open, onClose, title, children, footer }) {
       document.body.style.overflow = '';
     };
   }, [open, onClose]);
+  useBackHandler(!!open, () => onClose?.());
 
   if (!open) return null;
   return createPortal(
