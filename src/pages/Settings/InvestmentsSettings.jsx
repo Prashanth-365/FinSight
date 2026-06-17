@@ -36,17 +36,13 @@ export default function InvestmentsSettings() {
                       {inv.platform}{inv.identifier ? ` · ${inv.identifier}` : ''}
                     </p>
                   </div>
-                  <p className="text-sm font-semibold">{formatINRShort(inv.currentValue ?? inv.investedAmount ?? 0)}</p>
+                  <p className="text-sm font-semibold">{formatINRShort(inv.investedAmount ?? 0)}</p>
                 </li>
               ))}
             </ul>
           )}
         </div>
       </Card>
-      <p className="text-xs text-muted-fg px-1">
-        Tip: for Mutual Funds, set the identifier to your <strong>AMFI scheme code</strong> (e.g., <code>120503</code>) so we can fetch live NAV.
-        For Crypto, use a CoinGecko id (<code>bitcoin</code>, <code>ethereum</code>). For Stocks, use Alpha Vantage tickers like <code>RELIANCE.BSE</code>.
-      </p>
     </div>
   );
 }

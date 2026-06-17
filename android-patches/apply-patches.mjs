@@ -56,7 +56,9 @@ const permsToAdd = [
   '<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />',
   '<uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />',
   '<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />',
-  '<uses-permission android:name="android.permission.USE_BIOMETRIC" />'
+  '<uses-permission android:name="android.permission.USE_BIOMETRIC" />',
+  '<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />',
+  '<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />'
 ];
 for (const p of permsToAdd) {
   if (!manifest.includes(p)) {

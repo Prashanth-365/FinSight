@@ -27,15 +27,7 @@ export async function applyTransactionEffects(txn, sign) {
     if (inv) {
       const invDelta = sign * (txn.txnType === 'credit' ? -1 : 1) * amt;
       const investedAmount = Math.max(0, Number(inv.investedAmount ?? 0) + invDelta);
-      const patch = { investedAmount };
-      // Units mirror the amount: a buy (debit) adds the order's units, a sell removes.
-      if (txn.units) {
-        const unitsDelta = sign * (txn.txnType === 'credit' ? -1 : 1) * Number(txn.units);
-        patch.units = Math.max(0, Number(inv.units ?? 0) + unitsDelta);
-      }
-      // Only bump current value when applying (never shrink it on reversal).
-      if (sign > 0) patch.currentValue = Math.max(Number(inv.currentValue ?? 0), investedAmount);
-      await db.investments.update(inv.id, patch);
+      await db.investments.update(inv.id, { investedAmount });
     }
   }
 }

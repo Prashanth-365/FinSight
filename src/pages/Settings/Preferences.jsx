@@ -18,20 +18,17 @@ export default function Preferences() {
 
   const [defaultProfile, setDefaultProfile] = useState('');
   const [recentCount, setRecentCount] = useState(10);
-  const [alphaKey, setAlphaKey] = useState('');
 
   useEffect(() => {
     (async () => {
       setDefaultProfile((await getSetting('profile.active', '')) ?? '');
       setRecentCount(await getSetting('home.recentCount', 10));
-      setAlphaKey(await getSetting('alphavantage.key', ''));
     })();
   }, []);
 
   const save = async () => {
     await setSetting('profile.active', defaultProfile === '' ? null : Number(defaultProfile));
     await setSetting('home.recentCount', Number(recentCount));
-    await setSetting('alphavantage.key', alphaKey);
     success('Preferences saved');
   };
 
@@ -50,9 +47,6 @@ export default function Preferences() {
         <Field label="Recent transactions on Home">
           <Select value={recentCount} onChange={setRecentCount}
             options={[5, 10, 20, 50].map((n) => ({ value: n, label: `${n} transactions` }))} />
-        </Field>
-        <Field label="Alpha Vantage API key" hint="Optional, used to fetch live stock prices">
-          <input className="fs-input" value={alphaKey} onChange={(e) => setAlphaKey(e.target.value)} placeholder="leave blank to skip live stocks" />
         </Field>
         <button className="fs-btn-primary" onClick={save}>Save preferences</button>
       </Card>

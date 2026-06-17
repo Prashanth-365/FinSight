@@ -26,7 +26,6 @@ const empty = (profileId) => ({
   description: '',
   tags: '',
   investmentName: '', // used only when category resolves to type='investment'
-  unitPrice: '',      // optional price per unit → logs an investment order
   split: false,
   splits: [] // [{ key, name, amount, isMe }]
 });
@@ -84,8 +83,7 @@ export function TransactionSheet({
         txnType: editing.txnType ?? 'debit',
         description: editing.description ?? '',
         tags: (editing.tags ?? []).join(', '),
-        investmentName: linkedInv?.name ?? '',
-        unitPrice: editing.unitPrice ? String(editing.unitPrice) : ''
+        investmentName: linkedInv?.name ?? ''
       });
     } else {
       // Pick a sensible default profile:
@@ -341,15 +339,6 @@ export function TransactionSheet({
         investmentId = inv.id;
       }
 
-      // For investment buys/sells, optionally capture price per unit and derive
-      // units (amount ÷ price). These ride on the transaction, which IS the order.
-      let unitPrice = null;
-      let units = null;
-      if (investmentId && form.unitPrice) {
-        const p = Number(form.unitPrice);
-        if (isFinite(p) && p > 0) { unitPrice = p; units = amt / p; }
-      }
-
       const payload = {
         slNo: 0,
         dateTime,
@@ -364,8 +353,6 @@ export function TransactionSheet({
         tags,
         source: smsLink ? sourceKind : 'manual',
         investmentId,
-        unitPrice,
-        units,
         importFingerprint: txnFingerprint({
           accountId: Number(form.accountId),
           amount: amt,
@@ -646,33 +633,6 @@ export function TransactionSheet({
             emptyHint="Type the holding name — we'll create it on save"
           />
         </Field>
-      )}
-
-      {isInvestmentCategory && !form.split && form.investmentName?.trim() && (
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Price per unit (₹)" hint="Optional — logs an order with units">
-            <input
-              inputMode="decimal"
-              className="fs-input"
-              placeholder="e.g. 72.45"
-              value={form.unitPrice}
-              onChange={(e) => setForm({ ...form, unitPrice: e.target.value })}
-            />
-          </Field>
-          <Field label="Units">
-            <input
-              className="fs-input bg-muted/40 text-muted-fg"
-              readOnly
-              tabIndex={-1}
-              placeholder="amount ÷ price"
-              value={
-                form.unitPrice && Number(form.unitPrice) > 0 && form.amount
-                  ? (Number(form.amount) / Number(form.unitPrice)).toLocaleString('en-IN', { maximumFractionDigits: 4 })
-                  : ''
-              }
-            />
-          </Field>
-        </div>
       )}
 
       <Field label="Description">

@@ -1,5 +1,7 @@
 // Orchestrates: dump DB → (optionally encrypt) → upload, and download → (decrypt if needed) → restore.
 import { db, reindexSlNo, setSetting } from '@/db/database.js';
+import { Capacitor } from '@capacitor/core';
+import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
 import { encryptJson, decryptJson } from './crypto.js';
 import { uploadBackup, downloadBackup, findBackup } from './drive.js';
 
@@ -13,6 +15,49 @@ export async function dumpAll() {
   const data = {};
   for (const t of TABLES) data[t] = await db.table(t).toArray();
   return { version: 1, exportedAt: Date.now(), data };
+}
+
+/**
+ * Export the full dump to a local JSON file.
+ *   • Android (Capacitor): writes to shared storage under finsite/ via the
+ *     Filesystem plugin and returns the saved file URI.
+ *   • Web: triggers a normal browser download.
+ * @returns {{ platform: 'android'|'web', path: string }}
+ */
+export async function exportToFile() {
+  const payload = await dumpAll();
+  const json = JSON.stringify(payload, null, 2);
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+  const fileName = `finsite-backup-${stamp}.json`;
+
+  if (Capacitor.getPlatform() === 'android') {
+    // Request storage permission on first export (harmless for app-scoped dirs).
+    try {
+      const perm = await Filesystem.checkPermissions();
+      if (perm?.publicStorage && perm.publicStorage !== 'granted') {
+        await Filesystem.requestPermissions();
+      }
+    } catch { /* permission API isn't required for Directory.External */ }
+
+    const res = await Filesystem.writeFile({
+      path: `finsite/${fileName}`,
+      data: json,
+      directory: Directory.External,   // app's external storage (no scoped-storage hassle)
+      encoding: Encoding.UTF8,
+      recursive: true                  // auto-creates the finsite/ folder
+    });
+    return { platform: 'android', path: res?.uri || `finsite/${fileName}` };
+  }
+
+  // Web fallback — Blob download.
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  URL.revokeObjectURL(url);
+  return { platform: 'web', path: fileName };
 }
 
 export async function restoreAll(payload) {

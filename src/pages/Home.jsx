@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { Eye, EyeOff, Wallet, CreditCard, Landmark, PlusCircle, TrendingUp, TrendingDown } from 'lucide-react';
+import { Eye, EyeOff, Wallet, CreditCard, Landmark, PlusCircle } from 'lucide-react';
 import { db, getSetting, setSetting } from '@/db/database.js';
 import { useProfile } from '@/context/ProfileContext.jsx';
-import { Card, CardBody, CardHeader, CardTitle, CardSubtitle } from '@/components/ui/Card.jsx';
+import { Card, CardBody } from '@/components/ui/Card.jsx';
 import { EmptyState } from '@/components/ui/Empty.jsx';
 import { Avatar } from '@/components/ui/Avatar.jsx';
-import { formatINR, formatINRShort, formatPercent } from '@/lib/currency.js';
+import { formatINR, formatINRShort } from '@/lib/currency.js';
 import { fmtDate, maskNumber, cn, getAccountBalance } from '@/lib/utils.js';
 import { useOutletContext, Link } from 'react-router-dom';
 
@@ -43,25 +43,19 @@ export default function Home() {
   }, [txns, isMasterView, activeProfileId]);
 
   // assets vs liabilities
-  const { assets, liabilities, invested, currentValue } = useMemo(() => {
-    let assets = 0, liabilities = 0;
+  const { bank, liabilities, invested } = useMemo(() => {
+    let bank = 0, liabilities = 0;
     for (const a of filteredAccounts) {
       const bal = getAccountBalance(a, activeProfileId);
       if (a.type === 'card') liabilities += Math.max(0, -bal); // negative bal on card = outstanding
-      else assets += bal;
+      else bank += bal;
     }
-    let invested = 0, currentValue = 0;
-    for (const i of filteredInv) {
-      invested += Number(i.investedAmount ?? 0);
-      currentValue += Number(i.currentValue ?? i.investedAmount ?? 0);
-    }
-    assets += currentValue;
-    return { assets, liabilities, invested, currentValue };
-  }, [filteredAccounts, filteredInv]);
+    let invested = 0;
+    for (const i of filteredInv) invested += Number(i.investedAmount ?? 0);
+    return { bank, liabilities, invested };
+  }, [filteredAccounts, filteredInv, activeProfileId]);
 
-  const netWorth = assets - liabilities;
-  const pnl = currentValue - invested;
-  const pnlPct = invested > 0 ? (pnl / invested) * 100 : 0;
+  const netWorth = bank + invested - liabilities;
 
   const recents = filteredTxns.slice(0, recentCount);
 
@@ -80,46 +74,21 @@ export default function Home() {
         <h1 className="text-3xl font-bold tracking-tight">
           {show ? formatINR(netWorth, { hidePaise: true }) : '••••••'}
         </h1>
-        <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
+        <div className="mt-3 grid grid-cols-3 gap-2 text-sm">
           <div className="rounded-xl bg-surface/60 backdrop-blur p-3">
-            <p className="text-xs text-muted-fg">Assets</p>
-            <p className="font-semibold">{show ? formatINRShort(assets) : '••••'}</p>
+            <p className="text-[11px] text-muted-fg">Bank / Wallets</p>
+            <p className="font-semibold">{show ? formatINRShort(bank) : '••••'}</p>
           </div>
           <div className="rounded-xl bg-surface/60 backdrop-blur p-3">
-            <p className="text-xs text-muted-fg">Liabilities</p>
-            <p className="font-semibold">{show ? formatINRShort(liabilities) : '••••'}</p>
+            <p className="text-[11px] text-muted-fg">Invested</p>
+            <p className="font-semibold">{show ? formatINRShort(invested) : '••••'}</p>
+          </div>
+          <div className="rounded-xl bg-surface/60 backdrop-blur p-3">
+            <p className="text-[11px] text-muted-fg">Liabilities</p>
+            <p className="font-semibold text-danger">{show ? formatINRShort(liabilities) : '••••'}</p>
           </div>
         </div>
       </section>
-
-      {/* Investment summary */}
-      <Card>
-        <CardHeader className="flex items-start justify-between">
-          <div>
-            <CardTitle>Investments</CardTitle>
-            <CardSubtitle>Portfolio overview</CardSubtitle>
-          </div>
-          <Link to="/investments" className="text-xs text-primary font-medium">View all →</Link>
-        </CardHeader>
-        <CardBody className="grid grid-cols-3 gap-3">
-          <Stat label="Invested" value={formatINRShort(invested)} />
-          <Stat label="Current" value={formatINRShort(currentValue)} />
-          <Stat
-            label="P&L"
-            value={
-              <span className={cn(pnl >= 0 ? 'text-success' : 'text-danger')}>
-                {pnl >= 0 ? '+' : ''}{formatINRShort(pnl)}
-              </span>
-            }
-            sub={
-              <span className={cn('inline-flex items-center gap-0.5', pnl >= 0 ? 'text-success' : 'text-danger')}>
-                {pnl >= 0 ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-                {formatPercent(pnlPct, 2)}
-              </span>
-            }
-          />
-        </CardBody>
-      </Card>
 
       {/* Account cards */}
       <section>
@@ -222,16 +191,6 @@ export default function Home() {
           </Card>
         )}
       </section>
-    </div>
-  );
-}
-
-function Stat({ label, value, sub }) {
-  return (
-    <div>
-      <p className="text-[11px] text-muted-fg">{label}</p>
-      <p className="text-sm font-semibold mt-0.5">{value}</p>
-      {sub && <p className="text-[11px] mt-0.5">{sub}</p>}
     </div>
   );
 }

@@ -8,7 +8,7 @@ import { useToast } from '@/components/ui/Toast.jsx';
 import { SectionHeader } from './Profiles.jsx';
 import { passphraseScore } from '@/lib/crypto.js';
 import { isSignedIn, signInWithGoogle, getEffectiveClientId } from '@/lib/googleAuth.js';
-import { pushBackup, pullBackup, remoteStatus, verifyPassphraseAgainstRemote, TABLES, dumpAll, restoreAll } from '@/lib/backup.js';
+import { pushBackup, pullBackup, remoteStatus, verifyPassphraseAgainstRemote, TABLES, restoreAll, exportToFile } from '@/lib/backup.js';
 import { fmtDateTime, cn } from '@/lib/utils.js';
 
 export default function Data() {
@@ -17,15 +17,13 @@ export default function Data() {
   const [confirmReset, setConfirmReset] = useState(false);
 
   const onExport = async () => {
-    const payload = await dumpAll();
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `finsight-${new Date().toISOString().slice(0, 10)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    success('Export downloaded');
+    try {
+      const { platform, path } = await exportToFile();
+      if (platform === 'android') success(`Saved to ${path}`);
+      else success('Export downloaded');
+    } catch (e) {
+      error('Export failed: ' + e.message);
+    }
   };
 
   const onImport = async (e) => {

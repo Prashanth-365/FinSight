@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { db, getSetting } from '@/db/database.js';
+import { db } from '@/db/database.js';
 import { useProfile } from '@/context/ProfileContext.jsx';
 import { Card, CardBody, CardHeader, CardTitle, CardSubtitle } from '@/components/ui/Card.jsx';
 import { Modal, ConfirmDialog } from '@/components/ui/Modal.jsx';
@@ -8,14 +8,10 @@ import { Field, Label } from '@/components/ui/Input.jsx';
 import { Select } from '@/components/ui/Select.jsx';
 import { EmptyState } from '@/components/ui/Empty.jsx';
 import { useToast } from '@/components/ui/Toast.jsx';
-import {
-  TrendingUp, TrendingDown, Plus, RefreshCw, Trash2, Edit3, Coins, ChevronLeft, Calendar
-} from 'lucide-react';
-import { formatINR, formatINRShort, formatPercent } from '@/lib/currency.js';
+import { Plus, Trash2, Edit3, Coins, ChevronLeft, Calendar } from 'lucide-react';
+import { formatINR, formatINRShort } from '@/lib/currency.js';
 import { cn, fmtDate } from '@/lib/utils.js';
 import { useBackHandler } from '@/context/NavContext.jsx';
-import { fetchMfNav, fetchCryptoPriceINR, fetchStockPriceINR, fdProjection } from '@/lib/pricing.js';
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 
 const PLATFORMS = [
   { key: 'MF', label: 'Mutual Funds', icon: '📊', color: '#3b82f6' },
@@ -29,40 +25,6 @@ const PLATFORMS = [
   { key: 'Other', label: 'Other', icon: '✨', color: '#94a3b8' }
 ];
 
-// Platforms we can fetch a live value for.
-const REFRESHABLE = ['MF', 'Stock', 'Crypto', 'FD', 'PPF', 'EPF'];
-
-// Fetch the latest value for a holding → a number (new currentValue) or null if
-// no live price is available. Never throws.
-async function refreshHoldingValue(holding, apiKey) {
-  try {
-    const units = Number(holding.units ?? 0);
-    if (holding.platform === 'MF') {
-      const nav = await fetchMfNav(holding.identifier);
-      return nav == null ? null : (units > 0 ? nav * units : nav);
-    }
-    if (holding.platform === 'Crypto') {
-      const p = await fetchCryptoPriceINR(holding.identifier);
-      return p == null ? null : (units > 0 ? p * units : p);
-    }
-    if (holding.platform === 'Stock') {
-      const p = await fetchStockPriceINR(holding.identifier, apiKey);
-      return p == null ? null : (units > 0 ? p * units : p);
-    }
-    if (['FD', 'PPF', 'EPF'].includes(holding.platform)) {
-      const rate = holding.notes?.match(/(\d+(?:\.\d+)?)\s*%/)?.[1];
-      return fdProjection({
-        principal: holding.investedAmount,
-        ratePct: rate ? Number(rate) : 7,
-        startDate: holding.startDate
-      });
-    }
-  } catch {
-    /* fall through to null */
-  }
-  return null;
-}
-
 export default function Investments() {
   const { isMasterView, activeProfileId } = useProfile();
   const investments = useLiveQuery(() => db.investments.toArray(), [], []);
@@ -72,14 +34,12 @@ export default function Investments() {
     return investments.filter((i) => i.profileId === activeProfileId);
   }, [investments, isMasterView, activeProfileId]);
 
-  const { success, error } = useToast();
   const [platform, setPlatform] = useState(null);
   const [holdingId, setHoldingId] = useState(null);
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [busyAll, setBusyAll] = useState(false);
 
-  // Derive the open holding from the live list so refreshes/edits show instantly.
+  // Derive the open holding from the live list so edits show instantly.
   const holding = useMemo(
     () => (holdingId != null ? investments.find((i) => i.id === holdingId) ?? null : null),
     [investments, holdingId]
@@ -96,33 +56,12 @@ export default function Investments() {
 
   if (platform) {
     const list = filtered.filter((i) => i.platform === platform.key);
-    const canRefresh = REFRESHABLE.includes(platform.key);
-    const refreshAll = async () => {
-      setBusyAll(true);
-      const apiKey = await getSetting('alphavantage.key', '');
-      let ok = 0, fail = 0;
-      for (const inv of list) {
-        const v = await refreshHoldingValue(inv, apiKey);
-        if (v != null) { await db.investments.update(inv.id, { currentValue: v }); ok++; }
-        else fail++;
-      }
-      setBusyAll(false);
-      if (ok) success(`Refreshed ${ok}${fail ? `, ${fail} need a manual update` : ''}`);
-      else error('Could not fetch live prices — check the IDs or update manually.');
-    };
     return (
       <div className="space-y-3 animate-fade-in">
         <div className="flex items-center gap-2">
           <button onClick={() => setPlatform(null)} className="fs-btn-ghost"><ChevronLeft className="w-4 h-4" /> Back</button>
           <h1 className="text-lg font-semibold">{platform.icon} {platform.label}</h1>
-          <div className="ml-auto flex gap-2">
-            {canRefresh && list.length > 0 && (
-              <button onClick={refreshAll} disabled={busyAll} className="fs-btn-secondary">
-                <RefreshCw className={cn('w-4 h-4', busyAll && 'animate-spin')} /> {busyAll ? 'Refreshing…' : 'Refresh all'}
-              </button>
-            )}
-            <button onClick={() => setAdding(true)} className="fs-btn-primary"><Plus className="w-4 h-4" /> Add</button>
-          </div>
+          <button onClick={() => setAdding(true)} className="fs-btn-primary ml-auto"><Plus className="w-4 h-4" /> Add</button>
         </div>
         {list.length === 0 ? (
           <Card><div className="p-2">
@@ -153,32 +92,15 @@ export default function Investments() {
   for (const inv of filtered) {
     if (byPlatform[inv.platform]) byPlatform[inv.platform].push(inv);
   }
-
   const totalInvested = filtered.reduce((s, i) => s + Number(i.investedAmount ?? 0), 0);
-  const totalCurrent = filtered.reduce((s, i) => s + Number(i.currentValue ?? i.investedAmount ?? 0), 0);
-  const pnl = totalCurrent - totalInvested;
-  const pnlPct = totalInvested > 0 ? (pnl / totalInvested) * 100 : 0;
 
   return (
     <div className="space-y-4 animate-fade-in">
       <Card>
-        <CardBody className="grid grid-cols-3 gap-3">
-          <Stat label="Invested" value={formatINRShort(totalInvested)} />
-          <Stat label="Current" value={formatINRShort(totalCurrent)} />
-          <Stat
-            label="P&L"
-            value={
-              <span className={pnl >= 0 ? 'text-success' : 'text-danger'}>
-                {pnl >= 0 ? '+' : ''}{formatINRShort(pnl)}
-              </span>
-            }
-            sub={
-              <span className={cn('inline-flex items-center gap-0.5', pnl >= 0 ? 'text-success' : 'text-danger')}>
-                {pnl >= 0 ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-                {formatPercent(pnlPct, 2)}
-              </span>
-            }
-          />
+        <CardBody>
+          <p className="text-[11px] text-muted-fg uppercase tracking-wider">Total invested</p>
+          <p className="text-2xl font-bold tracking-tight mt-0.5">{formatINRShort(totalInvested)}</p>
+          <p className="text-xs text-muted-fg mt-1">Across {filtered.length} holding{filtered.length !== 1 ? 's' : ''}</p>
         </CardBody>
       </Card>
 
@@ -186,7 +108,6 @@ export default function Investments() {
         {PLATFORMS.map((p) => {
           const items = byPlatform[p.key];
           const inv = items.reduce((s, i) => s + Number(i.investedAmount ?? 0), 0);
-          const cur = items.reduce((s, i) => s + Number(i.currentValue ?? i.investedAmount ?? 0), 0);
           return (
             <button
               key={p.key}
@@ -199,12 +120,7 @@ export default function Investments() {
                 <span className="text-sm font-semibold">{p.label}</span>
               </div>
               <p className="text-xs text-muted-fg">{items.length} holding{items.length !== 1 ? 's' : ''}</p>
-              <p className="text-base font-semibold mt-1.5">{formatINRShort(cur)}</p>
-              {inv > 0 && (
-                <p className={cn('text-xs mt-0.5', cur >= inv ? 'text-success' : 'text-danger')}>
-                  {cur >= inv ? '+' : ''}{formatINRShort(cur - inv)} ({formatPercent(inv > 0 ? ((cur - inv) / inv) * 100 : 0)})
-                </p>
-              )}
+              <p className="text-base font-semibold mt-1.5">{formatINRShort(inv)}</p>
             </button>
           );
         })}
@@ -224,38 +140,26 @@ function Stat({ label, value, sub }) {
 }
 
 function HoldingRow({ inv, onClick }) {
-  const cur = Number(inv.currentValue ?? inv.investedAmount ?? 0);
   const invested = Number(inv.investedAmount ?? 0);
-  const pnl = cur - invested;
-  const pct = invested > 0 ? (pnl / invested) * 100 : 0;
   return (
     <li>
       <button onClick={onClick} className="w-full fs-card p-3.5 text-left flex items-center gap-3 hover:border-primary/60 transition-colors">
         <div className="flex-1 min-w-0">
           <p className="font-medium text-sm truncate">{inv.name}</p>
           <p className="text-xs text-muted-fg truncate">
-            {inv.identifier && `${inv.identifier} · `}
-            Invested {formatINRShort(invested)}
+            {inv.platform}{inv.identifier ? ` · ${inv.identifier}` : ''}
           </p>
         </div>
-        <div className="text-right">
-          <p className="font-semibold text-sm">{formatINRShort(cur)}</p>
-          <p className={cn('text-xs', pnl >= 0 ? 'text-success' : 'text-danger')}>
-            {pnl >= 0 ? '+' : ''}{formatINRShort(pnl)} ({formatPercent(pct)})
-          </p>
-        </div>
+        <p className="font-semibold text-sm shrink-0">{formatINRShort(invested)}</p>
       </button>
     </li>
   );
 }
 
 function HoldingDetail({ holding, onBack, onEdit }) {
-  const { error, success } = useToast();
-  const [busy, setBusy] = useState(false);
+  const { success } = useToast();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [recordPayment, setRecordPayment] = useState(false);
-  const [editPrice, setEditPrice] = useState(false);
-  const [priceDraft, setPriceDraft] = useState('');
 
   const chit = useLiveQuery(
     () => holding.platform === 'Chit' ? db.chitFunds.where({ investmentId: holding.id }).first() : null,
@@ -272,24 +176,6 @@ function HoldingDetail({ holding, onBack, onEdit }) {
     [orders]
   );
 
-  const refresh = async () => {
-    setBusy(true);
-    try {
-      const apiKey = await getSetting('alphavantage.key', '');
-      const v = await refreshHoldingValue(holding, apiKey);
-      if (v != null) {
-        await db.investments.update(holding.id, { currentValue: v });
-        success('Refreshed');
-      } else {
-        error('Could not fetch a live price — check the ID, or set the price manually below.');
-      }
-    } catch (e) {
-      error(e.message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const del = async () => {
     await db.investments.delete(holding.id);
     if (chit) await db.chitFunds.delete(chit.id);
@@ -298,36 +184,6 @@ function HoldingDetail({ holding, onBack, onEdit }) {
   };
 
   const invested = Number(holding.investedAmount ?? 0);
-  const cur = Number(holding.currentValue ?? invested);
-  const pnl = cur - invested;
-  const pct = invested > 0 ? (pnl / invested) * 100 : 0;
-
-  const units = Number(holding.units ?? 0);
-  const unitPrice = units > 0 ? cur / units : null;
-  const savePrice = async () => {
-    const p = Number(priceDraft);
-    if (!isFinite(p) || p < 0) { error('Enter a valid price'); return; }
-    await db.investments.update(holding.id, { currentValue: p * units });
-    setEditPrice(false);
-    success('Price updated');
-  };
-
-  // simple value-over-time chart: invested vs current at startDate vs today.
-  const chartData = useMemo(() => {
-    if (holding.platform === 'Chit' && chit?.installments?.length) {
-      let paid = 0;
-      return chit.installments
-        .filter((i) => i.paid)
-        .map((i) => {
-          paid += Number(i.amount ?? chit.monthlyAmt ?? 0);
-          return { date: fmtDate(i.date), value: paid };
-        });
-    }
-    const data = [];
-    if (holding.startDate) data.push({ date: fmtDate(holding.startDate), value: invested });
-    data.push({ date: 'Now', value: cur });
-    return data;
-  }, [holding, chit, invested, cur]);
 
   return (
     <div className="space-y-3 animate-fade-in">
@@ -341,76 +197,12 @@ function HoldingDetail({ holding, onBack, onEdit }) {
       <Card>
         <CardBody className="grid grid-cols-2 gap-4">
           <Stat label="Invested" value={formatINR(invested, { hidePaise: true })} />
-          <Stat label="Current" value={formatINR(cur, { hidePaise: true })} />
-          <Stat label="P&L" value={
-            <span className={pnl >= 0 ? 'text-success' : 'text-danger'}>
-              {pnl >= 0 ? '+' : ''}{formatINR(pnl, { hidePaise: true })}
-            </span>
-          } />
-          <Stat label="Return" value={
-            <span className={pnl >= 0 ? 'text-success' : 'text-danger'}>{formatPercent(pct)}</span>
-          } />
+          <Stat label="Platform" value={holding.platform} />
+          {holding.identifier && <Stat label="Folio / ID" value={holding.identifier} />}
           {holding.startDate && <Stat label="Started" value={fmtDate(holding.startDate)} />}
           {holding.maturityDate && <Stat label="Matures" value={fmtDate(holding.maturityDate)} />}
         </CardBody>
-        {units > 0 && (
-          <div className="px-4 pb-2 flex items-center justify-between gap-2 text-sm">
-            <span className="text-muted-fg">Price / NAV per unit</span>
-            {editPrice ? (
-              <span className="flex items-center gap-1.5">
-                <input
-                  inputMode="decimal"
-                  autoFocus
-                  className="fs-input w-28 py-1 text-right"
-                  value={priceDraft}
-                  onChange={(e) => setPriceDraft(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') savePrice(); if (e.key === 'Escape') setEditPrice(false); }}
-                />
-                <button className="fs-btn-secondary text-xs px-2 py-1" onClick={savePrice}>Save</button>
-                <button className="fs-btn-ghost text-xs px-2 py-1" onClick={() => setEditPrice(false)}>Cancel</button>
-              </span>
-            ) : (
-              <button
-                className="font-semibold tabular-nums inline-flex items-center gap-1.5 hover:text-primary"
-                onClick={() => { setPriceDraft(unitPrice != null ? String(Number(unitPrice.toFixed(4))) : ''); setEditPrice(true); }}
-                title="Tap to edit — updates current value as price × units"
-              >
-                {unitPrice != null ? formatINR(unitPrice) : '—'} <Edit3 className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-        )}
-        <div className="px-4 pb-4 flex gap-2">
-          <button onClick={refresh} disabled={busy} className="fs-btn-secondary">
-            <RefreshCw className={cn('w-4 h-4', busy && 'animate-spin')} /> Refresh value
-          </button>
-        </div>
       </Card>
-
-      {chartData.length > 1 && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Value over time</CardTitle>
-            <CardSubtitle>Estimated</CardSubtitle>
-          </CardHeader>
-          <CardBody>
-            <div className="h-56">
-              <ResponsiveContainer>
-                <LineChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgb(var(--border))" />
-                  <XAxis dataKey="date" tick={{ fontSize: 11 }} stroke="rgb(var(--muted-fg))" />
-                  <YAxis tick={{ fontSize: 11 }} stroke="rgb(var(--muted-fg))" tickFormatter={(v) => formatINRShort(v)} />
-                  <Tooltip
-                    contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 12 }}
-                    formatter={(v) => formatINR(v, { hidePaise: true })}
-                  />
-                  <Line type="monotone" dataKey="value" stroke="rgb(var(--primary))" strokeWidth={2.5} dot={{ r: 3 }} />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          </CardBody>
-        </Card>
-      )}
 
       {sortedOrders.length > 0 && (
         <Card>
@@ -425,16 +217,11 @@ function HoldingDetail({ holding, onBack, onEdit }) {
                 <div className="min-w-0">
                   <p className="font-medium">
                     <span className={o.txnType === 'credit' ? 'text-danger' : 'text-success'}>
-                      {o.txnType === 'credit' ? 'Sell' : 'Buy'}
+                      {o.txnType === 'credit' ? 'Sell / Withdraw' : 'Buy / Invest'}
                     </span>
-                    {o.units ? (
-                      <span className="text-muted-fg">
-                        {' · '}{Number(o.units).toLocaleString('en-IN', { maximumFractionDigits: 4 })} units
-                      </span>
-                    ) : null}
                   </p>
                   <p className="text-[11px] text-muted-fg">
-                    {fmtDate(o.dateTime)}{o.unitPrice ? ` · @ ${formatINR(o.unitPrice, { hidePaise: true })}` : ''}
+                    {fmtDate(o.dateTime)}{o.description ? ` · ${o.description}` : ''}
                   </p>
                 </div>
                 <p className="font-semibold tabular-nums shrink-0">{formatINR(o.amount, { hidePaise: true })}</p>
@@ -573,9 +360,7 @@ function InvestmentForm({ open, onClose, platform, editing }) {
     platform,
     name: '',
     identifier: '',
-    units: '',
     investedAmount: '',
-    currentValue: '',
     startDate: '',
     maturityDate: '',
     notes: '',
@@ -610,9 +395,7 @@ function InvestmentForm({ open, onClose, platform, editing }) {
         platform: form.platform,
         name: form.name,
         identifier: form.identifier || null,
-        units: form.units ? Number(form.units) : null,
         investedAmount: Number(form.investedAmount || 0),
-        currentValue: Number(form.currentValue || form.investedAmount || 0),
         startDate: form.startDate ? new Date(form.startDate).getTime() : null,
         maturityDate: form.maturityDate ? new Date(form.maturityDate).getTime() : null,
         notes: form.notes ?? ''
@@ -682,22 +465,11 @@ function InvestmentForm({ open, onClose, platform, editing }) {
         <Field label="Name">
           <input className="fs-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Axis Bluechip" />
         </Field>
-        <Field
-          label={platform === 'MF' ? 'AMFI scheme code' : platform === 'Stock' ? 'Ticker (e.g. RELIANCE.BSE)' : platform === 'Crypto' ? 'CoinGecko id (e.g. bitcoin)' : 'Identifier / folio'}
-          hint={platform === 'MF' ? 'From api.mfapi.in/mf/search?q=NAME — the schemeCode number' : platform === 'Stock' ? 'TICKER.BSE or .NSE; needs an Alpha Vantage key in Preferences' : platform === 'Crypto' ? 'CoinGecko coin id, e.g. bitcoin, ethereum' : 'Used to fetch live prices'}
-        >
+        <Field label="Folio / identifier" hint="Optional — folio number or any reference">
           <input className="fs-input" value={form.identifier} onChange={(e) => setForm({ ...form, identifier: e.target.value })} placeholder="Optional" />
         </Field>
-        {(platform === 'MF' || platform === 'Stock' || platform === 'Crypto' || platform === 'Gold') && (
-          <Field label="Units / quantity">
-            <input inputMode="decimal" className="fs-input" value={form.units} onChange={(e) => setForm({ ...form, units: e.target.value })} placeholder="0" />
-          </Field>
-        )}
         <Field label="Invested (₹)">
           <input inputMode="decimal" className="fs-input" value={form.investedAmount} onChange={(e) => setForm({ ...form, investedAmount: e.target.value })} placeholder="0" />
-        </Field>
-        <Field label="Current value (₹)">
-          <input inputMode="decimal" className="fs-input" value={form.currentValue} onChange={(e) => setForm({ ...form, currentValue: e.target.value })} placeholder="defaults to invested" />
         </Field>
         <Field label="Start date">
           <input type="date" className="fs-input" value={form.startDate} onChange={(e) => setForm({ ...form, startDate: e.target.value })} />
