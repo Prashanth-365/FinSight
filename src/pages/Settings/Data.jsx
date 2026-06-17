@@ -19,7 +19,7 @@ export default function Data() {
   const onExport = async () => {
     try {
       const { platform, path } = await exportToFile();
-      if (platform === 'android') success(`Saved to ${path}`);
+      if (platform === 'android') success(`Saved to Downloads → ${path}`);
       else success('Export downloaded');
     } catch (e) {
       error('Export failed: ' + e.message);

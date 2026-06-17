@@ -4,6 +4,7 @@ import { Capacitor } from '@capacitor/core';
 import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
 import { encryptJson, decryptJson } from './crypto.js';
 import { uploadBackup, downloadBackup, findBackup } from './drive.js';
+import { saveToDownloads } from './fileExport.js';
 
 // Single source of truth for which tables are backed up / exported / imported.
 export const TABLES = [
@@ -19,8 +20,9 @@ export async function dumpAll() {
 
 /**
  * Export the full dump to a local JSON file.
- *   • Android (Capacitor): writes to shared storage under finsite/ via the
- *     Filesystem plugin and returns the saved file URI.
+ *   • Android (Capacitor): writes to the PUBLIC Downloads/finsite folder via the
+ *     native FileExport (MediaStore) plugin so it shows up in the Downloads app
+ *     and Recent files. Falls back to app-scoped external storage if that fails.
  *   • Web: triggers a normal browser download.
  * @returns {{ platform: 'android'|'web', path: string }}
  */
@@ -31,22 +33,35 @@ export async function exportToFile() {
   const fileName = `finsite-backup-${stamp}.json`;
 
   if (Capacitor.getPlatform() === 'android') {
-    // Request storage permission on first export (harmless for app-scoped dirs).
+    // Preferred: public Downloads/finsite via MediaStore (visible in Downloads
+    // app & Recent files, no runtime permission on Android 10+).
     try {
-      const perm = await Filesystem.checkPermissions();
-      if (perm?.publicStorage && perm.publicStorage !== 'granted') {
-        await Filesystem.requestPermissions();
-      }
-    } catch { /* permission API isn't required for Directory.External */ }
+      const res = await saveToDownloads({
+        fileName,
+        data: json,
+        subDir: 'finsite',
+        mimeType: 'application/json'
+      });
+      return { platform: 'android', path: res?.uri || `Download/finsite/${fileName}` };
+    } catch {
+      // Fallback: app-scoped external storage (always works, but hidden from
+      // the Downloads UI). Better a saved file than a failed export.
+      try {
+        const perm = await Filesystem.checkPermissions();
+        if (perm?.publicStorage && perm.publicStorage !== 'granted') {
+          await Filesystem.requestPermissions();
+        }
+      } catch { /* permission API isn't required for Directory.External */ }
 
-    const res = await Filesystem.writeFile({
-      path: `finsite/${fileName}`,
-      data: json,
-      directory: Directory.External,   // app's external storage (no scoped-storage hassle)
-      encoding: Encoding.UTF8,
-      recursive: true                  // auto-creates the finsite/ folder
-    });
-    return { platform: 'android', path: res?.uri || `finsite/${fileName}` };
+      const res = await Filesystem.writeFile({
+        path: `finsite/${fileName}`,
+        data: json,
+        directory: Directory.External,   // app's external storage (no scoped-storage hassle)
+        encoding: Encoding.UTF8,
+        recursive: true                  // auto-creates the finsite/ folder
+      });
+      return { platform: 'android', path: res?.uri || `finsite/${fileName}` };
+    }
   }
 
   // Web fallback — Blob download.

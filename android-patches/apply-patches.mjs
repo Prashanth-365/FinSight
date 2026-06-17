@@ -39,7 +39,7 @@ fs.writeFileSync(path.join(PACKAGE_PATH, 'MainActivity.java'), mainSrc);
 log('Wrote MainActivity.java');
 
 // 2. Native plugin sources
-for (const f of ['SmsReaderPlugin.kt', 'SmsListenerService.kt', 'BiometricAuthPlugin.kt']) {
+for (const f of ['SmsReaderPlugin.kt', 'SmsListenerService.kt', 'BiometricAuthPlugin.kt', 'FileExportPlugin.kt']) {
   const src = fs.readFileSync(path.join(__dirname, f), 'utf8');
   fs.writeFileSync(path.join(PACKAGE_PATH, f), src);
   log('Wrote ' + f);

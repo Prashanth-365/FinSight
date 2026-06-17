@@ -119,9 +119,12 @@ it now only adjusts the holding's `investedAmount` (no units/currentValue).
    Preferences (theme / default profile / recent count / biometric lock — **no API keys**);
    Data (export/import, encrypted Drive sync).
 10. **Export/Import**: `exportToFile()` in `src/lib/backup.js` — Android writes
-    `finsite/finsite-backup-<ts>.json` via `@capacitor/filesystem` (`Directory.External`,
-    recursive, UTF8) and toasts the saved path; web does a Blob download. Import = file input
-    (works in the Android WebView too).
+    `Download/finsite/finsite-backup-<ts>.json` to the **public Downloads** folder via the
+    native `FileExport` plugin (MediaStore on API 29+, no runtime permission; legacy direct
+    write on API <=28) so it shows in the Downloads app & Recent files; falls back to
+    `@capacitor/filesystem` (`Directory.External`) if MediaStore fails. Web does a Blob
+    download. JS bridge: `src/lib/fileExport.js`. Import = file input (works in the Android
+    WebView too).
 11. **Drive sync**: AES-256-GCM + PBKDF2-SHA256 (200k) client-side encryption → `drive.appdata`.
     Passphrase never stored; before overwriting, `verifyPassphraseAgainstRemote` decrypts the
     existing backup to catch typos; first-ever backup asks to re-type.
@@ -130,11 +133,12 @@ it now only adjusts the holding's `investedAmount` (no units/currentValue).
 ## Android / Capacitor
 - `capacitor.config.json`: appId `com.finsight.app`.
 - Native sources live in `android-patches/` (NOT a committed `android/`). `apply-patches.mjs`
-  runs after `npx cap add android`: copies Kotlin plugins + MainActivity, adds permissions
-  (SMS, notifications, foreground-service, biometric, **WRITE/READ_EXTERNAL_STORAGE**),
-  deep-link intent-filters, the service decl, kotlin-android plugin, androidx.biometric.
-- JS bridges: `src/lib/smsNative.js`, `src/lib/biometric.js` (no-op on web; gate on
-  `Capacitor.getPlatform()==='android'`).
+  runs after `npx cap add android`: copies Kotlin plugins (SmsReader, BiometricAuth,
+  **FileExport**) + MainActivity, adds permissions (SMS, notifications, foreground-service,
+  biometric, **WRITE/READ_EXTERNAL_STORAGE**), deep-link intent-filters, the service decl,
+  kotlin-android plugin, androidx.biometric.
+- JS bridges: `src/lib/smsNative.js`, `src/lib/biometric.js`, `src/lib/fileExport.js` (no-op /
+  throw on web; gate on `Capacitor.getPlatform()==='android'`).
 
 ## Deployment
 - Web: push to `main` → Vercel (Vite). Env: `VITE_GOOGLE_CLIENT_ID`, `VITE_OAUTH_REDIRECT_URL`.
