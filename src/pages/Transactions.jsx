@@ -17,7 +17,7 @@ import {
   Filter, Trash2, Edit3, ListOrdered, X, MousePointer2, CheckSquare, Square
 } from 'lucide-react';
 import { formatINR } from '@/lib/currency.js';
-import { fmtDate, fmtDateTime, cn, maskNumber, freqSorted } from '@/lib/utils.js';
+import { fmtDate, fmtDateTime, cn, maskNumber, freqSorted, accountSort } from '@/lib/utils.js';
 
 const LONG_PRESS_MS = 450;
 
@@ -134,7 +134,7 @@ export default function Transactions() {
             onChange={(v) => setFilters({ ...filters, accountId: v })}
             options={[
               { value: '', label: 'All accounts' },
-              ...accounts.map((a) => ({ value: a.id, label: `${a.name} ${maskNumber(a.number)}` }))
+              ...accountSort(accounts).map((a) => ({ value: a.id, label: `${a.name} ${maskNumber(a.number)}` }))
             ]}
           />
         </div>
@@ -529,7 +529,7 @@ function BulkEditModal({ open, onClose, ids, topCats, allCats, accounts, profile
         </Field>
         <Field label="Account">
           <Select value={patch.accountId ?? ''} onChange={(v) => setPatch({ ...patch, accountId: v })}
-            options={[{ value: '', label: '— keep —' }, ...accounts.map((a) => ({ value: a.id, label: a.name }))]} />
+            options={[{ value: '', label: '— keep —' }, ...accountSort(accounts).map((a) => ({ value: a.id, label: a.name }))]} />
         </Field>
         <Field label="Category">
           <Combobox value={patch.category ?? ''} onChange={(v) => setPatch({ ...patch, category: v, subCategory: '' })} suggestions={catSuggestions} />

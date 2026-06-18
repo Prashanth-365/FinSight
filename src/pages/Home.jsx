@@ -7,8 +7,9 @@ import { Card, CardBody } from '@/components/ui/Card.jsx';
 import { EmptyState } from '@/components/ui/Empty.jsx';
 import { Avatar } from '@/components/ui/Avatar.jsx';
 import { formatINR, formatINRShort } from '@/lib/currency.js';
-import { fmtDate, maskNumber, cn, getAccountBalance } from '@/lib/utils.js';
+import { fmtDate, maskNumber, cn, getAccountBalance, accountSort } from '@/lib/utils.js';
 import { useOutletContext, Link } from 'react-router-dom';
+import HomeCharts from '@/components/home/HomeCharts.jsx';
 
 const ACCOUNT_ICONS = { bank: Landmark, card: CreditCard, wallet: Wallet };
 
@@ -28,8 +29,10 @@ export default function Home() {
   }, []);
 
   const filteredAccounts = useMemo(() => {
-    if (isMasterView) return accounts;
-    return accounts.filter((a) => (a.profileIds ?? []).includes(activeProfileId));
+    const list = isMasterView
+      ? accounts
+      : accounts.filter((a) => (a.profileIds ?? []).includes(activeProfileId));
+    return accountSort(list);
   }, [accounts, isMasterView, activeProfileId]);
 
   const filteredInv = useMemo(() => {
@@ -191,6 +194,9 @@ export default function Home() {
           </Card>
         )}
       </section>
+
+      {/* Dashboard charts */}
+      <HomeCharts />
     </div>
   );
 }

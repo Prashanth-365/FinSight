@@ -8,7 +8,7 @@ import { Combobox } from '@/components/ui/Combobox.jsx';
 import { Select } from '@/components/ui/Select.jsx';
 import { useProfile } from '@/context/ProfileContext.jsx';
 import { useToast } from '@/components/ui/Toast.jsx';
-import { freqSorted, todayLocalISO, tsToLocalISO, maskNumber, getAccountBalance, inferInvestmentPlatform, txnFingerprint, uid } from '@/lib/utils.js';
+import { freqSorted, todayLocalISO, tsToLocalISO, maskNumber, getAccountBalance, inferInvestmentPlatform, txnFingerprint, uid, accountSort } from '@/lib/utils.js';
 import { formatINR } from '@/lib/currency.js';
 import { ArrowDownLeft, ArrowUpRight, Users, ChevronLeft, ChevronRight, Trash2, Split, Plus, X } from 'lucide-react';
 import { Link } from 'react-router-dom';
@@ -399,7 +399,7 @@ export function TransactionSheet({
   };
 
   const profileOptions = profiles.map((p) => ({ value: p.id, label: p.name }));
-  const accountOptions = (accounts ?? []).filter((a) => a.isActive !== 0);
+  const accountOptions = accountSort((accounts ?? []).filter((a) => a.isActive !== 0));
   const noProfiles = profiles.length === 0;
 
   if (open && noProfiles) {

@@ -10,7 +10,7 @@ import { Select } from '@/components/ui/Select.jsx';
 import { useToast } from '@/components/ui/Toast.jsx';
 import { parseStatement } from '@/lib/statement/index.js';
 import { ingestStatementRows } from '@/lib/reconcile.js';
-import { maskNumber } from '@/lib/utils.js';
+import { maskNumber, accountSort } from '@/lib/utils.js';
 
 export function StatementImportModal({ open, onClose, accounts = [] }) {
   const { success, error } = useToast();
@@ -63,7 +63,7 @@ export function StatementImportModal({ open, onClose, accounts = [] }) {
           onChange={setAccountId}
           options={[
             { value: '', label: 'Pick account…' },
-            ...accounts.map((a) => ({ value: a.id, label: `${a.name} ${maskNumber(a.number)}` }))
+            ...accountSort(accounts).map((a) => ({ value: a.id, label: `${a.name} ${maskNumber(a.number)}` }))
           ]}
         />
       </Field>

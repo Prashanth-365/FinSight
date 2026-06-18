@@ -167,37 +167,31 @@ it now only adjusts the holding's `investedAmount` (no units/currentValue).
 **3. Simplified Home net worth**: one section, `(bank + invested) − liabilities` headline +
    3 components (Bank/Wallets, Invested, Liabilities). Removed the separate investment card.
 
+**4. REORDERABLE ACCOUNTS**: added `sortOrder` to accounts (sorted in JS, no Dexie index);
+   `@dnd-kit/core`+`/sortable`+`/utilities` in package.json. `Accounts.jsx` list wrapped in
+   dnd-kit `DndContext`+`SortableContext` (verticalListSortingStrategy) with a `GripVertical`
+   handle; drag end `arrayMove`s then persists `sortOrder = index` for all rows in one
+   `db.transaction('rw', …)`. New accounts append with `sortOrder = max(existing ?? id) + 1`
+   (editor receives `accounts`). New `accountSort(accounts)` in `src/lib/utils.js`
+   (`(a.sortOrder ?? a.id) - (b.sortOrder ?? b.id)`) applied at every listing site: Home cards,
+   TransactionSheet options, Transactions top select + bulk-edit, StatementImportModal, and the
+   Accounts settings list itself.
+
+**5. HOME DASHBOARD CHARTS** (`src/components/home/HomeCharts.jsx`, mounted below Recent
+   Transactions; profile-aware, Indian ₹). Helpers added to utils: `transferCategoryIds`,
+   `bucketStart`/`bucketLabel` (day/week-Monday/month).
+   - **Chart A — diverging cash-flow bars**: Daily/Weekly/Monthly toggle; credits UP (green),
+     debits DOWN (negative, red) from `ReferenceLine y={0}`, NET labelled per bucket; Transfer
+     excluded. Horizontally scrollable, newest bucket RIGHT; scroll-left lazily widens the Dexie
+     window (`where('dateTime').aboveOrEqual(windowStart)`) in pages, restoring scroll via
+     `useLayoutEffect`, until the earliest txn is reached.
+   - **Chart B — category spend donut**: Recharts `PieChart`+`Pie innerRadius`; Monthly/Yearly
+     modes with this/previous/custom (month(s)/range or year(s)/range); center total; legend
+     lists each category's ₹ amount + % of total. Transfer excluded; debits only.
+
 ### ⏳ PENDING — implement next (start here in the new chat)
 
-**4. REORDERABLE ACCOUNTS**
-- Add `sortOrder` (number) to the accounts table (no Dexie index needed; sort in JS).
-- `package.json`: add `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/utilities`.
-- `src/pages/Settings/Accounts.jsx`: wrap the list in dnd-kit `DndContext` +
-  `SortableContext` (verticalListSortingStrategy) with a `GripVertical` handle; on drag end,
-  `arrayMove` then persist `sortOrder = index` for all rows in one `db.transaction('rw', …)`.
-  New accounts: `sortOrder = max(existing sortOrder ?? id) + 1` (append; pass `accounts` into
-  the editor).
-- Add `accountSort(accounts)` to `src/lib/utils.js`:
-  `[...accounts].sort((a,b) => (a.sortOrder ?? a.id) - (b.sortOrder ?? b.id))`.
-- Apply `accountSort` everywhere accounts are listed: Home cards (`filteredAccounts`),
-  `TransactionSheet` account options, `Transactions` (top account select + FilterDrawer),
-  `StatementImportModal` account select, and the Accounts settings list itself.
-
-**5. HOME DASHBOARD CHARTS** (below Recent Transactions; new component, e.g.
-`src/components/home/HomeCharts.jsx`). Respect the active profile (ProfileContext). Indian ₹.
-- **Chart A — diverging income/expense bars**: Daily/Weekly/Monthly dropdown. Per bucket,
-  TWO bars from a y=0 baseline — credits UP (green), debits DOWN (stored as negative, red) —
-  with the NET (credits−debits) labelled per bucket. **Exclude the Transfer category** (and its
-  sub-categories) from all sums. Recharts `BarChart` + `ReferenceLine y={0}`, one `Bar` for
-  credit (positive) + one for debit (negative). Horizontally scrollable, newest bucket on the
-  RIGHT, infinite scroll backward — lazy-load older buckets from Dexie in pages as the user
-  scrolls left, until no older transactions remain.
-- **Chart B — category spend donut**: Recharts donut (PieChart + innerRadius). Period selector
-  with two modes — Monthly (this / previous / custom month(s) / custom range) and Yearly (this /
-  previous / custom year(s) / custom range). **Exclude Transfer.** Legend lists each category
-  with its ₹ amount (Indian format) + % of total.
-- Helpers to add: bucketing by day/week/month; a `Transfer` category-id set built from
-  `categories` (top-level "Transfer" + its children) for exclusion.
+_(none — items 1–5 of this batch are complete.)_
 
 ### General constraints (unchanged)
 - Keep auth, profiles, alias mapping, auto-suggest, merge logic, SMS-queue foundation intact.

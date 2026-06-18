@@ -1,6 +1,23 @@
 import { useEffect, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { Plus, Edit3, Trash2, Wallet, CreditCard, Landmark, X } from 'lucide-react';
+import { Plus, Edit3, Trash2, Wallet, CreditCard, Landmark, X, GripVertical } from 'lucide-react';
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  TouchSensor,
+  useSensor,
+  useSensors
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { db } from '@/db/database.js';
 import { Card } from '@/components/ui/Card.jsx';
 import { Modal, ConfirmDialog } from '@/components/ui/Modal.jsx';
@@ -8,7 +25,7 @@ import { Field } from '@/components/ui/Input.jsx';
 import { Select } from '@/components/ui/Select.jsx';
 import { useToast } from '@/components/ui/Toast.jsx';
 import { SectionHeader } from './Profiles.jsx';
-import { maskNumber, cn, getAccountBalance } from '@/lib/utils.js';
+import { maskNumber, cn, getAccountBalance, accountSort } from '@/lib/utils.js';
 import { formatINR } from '@/lib/currency.js';
 import { Avatar } from '@/components/ui/Avatar.jsx';
 
@@ -21,12 +38,25 @@ const TYPES = [
 const COLORS = ['#22d3ee', '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#a855f7', '#ec4899', '#64748b'];
 
 export default function Accounts() {
-  const accounts = useLiveQuery(() => db.accounts.toArray(), [], []);
+  const accountsRaw = useLiveQuery(() => db.accounts.toArray(), [], []);
   const profiles = useLiveQuery(() => db.profiles.toArray(), [], []);
   const [editing, setEditing] = useState(null);
   const [adding, setAdding] = useState(false);
   const [toDelete, setToDelete] = useState(null);
   const { success, error } = useToast();
+
+  // Locally-ordered copy so a drag reorders instantly; persisted on drop.
+  const [order, setOrder] = useState([]);
+  useEffect(() => {
+    setOrder(accountSort(accountsRaw));
+  }, [accountsRaw]);
+
+  const sensors = useSensors(
+    // A small activation distance keeps taps on the edit/delete buttons working.
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 180, tolerance: 8 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+  );
 
   const del = async () => {
     if (!toDelete) return;
@@ -40,6 +70,22 @@ export default function Accounts() {
     setToDelete(null);
   };
 
+  const onDragEnd = async ({ active, over }) => {
+    if (!over || active.id === over.id) return;
+    const oldIndex = order.findIndex((a) => a.id === active.id);
+    const newIndex = order.findIndex((a) => a.id === over.id);
+    if (oldIndex < 0 || newIndex < 0) return;
+    const next = arrayMove(order, oldIndex, newIndex);
+    setOrder(next); // optimistic
+    await db.transaction('rw', db.accounts, async () => {
+      for (let i = 0; i < next.length; i++) {
+        if (next[i].sortOrder !== i) {
+          await db.accounts.update(next[i].id, { sortOrder: i });
+        }
+      }
+    });
+  };
+
   return (
     <div className="space-y-3 animate-fade-in">
       <SectionHeader title="Accounts" subtitle="Banks, cards, wallets — and SMS aliases" />
@@ -47,45 +93,31 @@ export default function Accounts() {
         <Plus className="w-4 h-4" /> Add account
       </button>
 
-      <ul className="space-y-2">
-        {accounts.map((a) => {
-          const Icon = TYPES.find((t) => t.value === a.type)?.icon ?? Landmark;
-          return (
-            <li key={a.id}>
-              <Card className="p-3">
-                <div className="flex items-center gap-3">
-                  <span
-                    className="w-10 h-10 rounded-xl inline-flex items-center justify-center"
-                    style={{ background: (a.color ?? '#22d3ee') + '22', color: a.color ?? '#22d3ee' }}
-                  >
-                    <Icon className="w-5 h-5" />
-                  </span>
-                  <div className="flex-1 min-w-0">
-                    <p className="font-medium text-sm">{a.name}</p>
-                    <p className="text-xs text-muted-fg">
-                      {maskNumber(a.number)} · {formatINR(getAccountBalance(a, null), { hidePaise: true })}
-                    </p>
-                  </div>
-                  <span className="fs-chip text-[10px] uppercase">{a.type}</span>
-                  <button className="fs-btn-ghost" onClick={() => setEditing(a)}><Edit3 className="w-4 h-4" /></button>
-                  <button className="fs-btn-ghost text-danger" onClick={() => setToDelete(a)}><Trash2 className="w-4 h-4" /></button>
-                </div>
-                {(a.aliases ?? []).length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {a.aliases.map((al) => <span key={al} className="fs-chip">{al}</span>)}
-                  </div>
-                )}
-              </Card>
-            </li>
-          );
-        })}
-      </ul>
+      {order.length > 1 && (
+        <p className="text-[11px] text-muted-fg px-1">Drag the handle to reorder how accounts appear across the app.</p>
+      )}
+
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+        <SortableContext items={order.map((a) => a.id)} strategy={verticalListSortingStrategy}>
+          <ul className="space-y-2">
+            {order.map((a) => (
+              <SortableAccountRow
+                key={a.id}
+                account={a}
+                onEdit={() => setEditing(a)}
+                onDelete={() => setToDelete(a)}
+              />
+            ))}
+          </ul>
+        </SortableContext>
+      </DndContext>
 
       <AccountEditor
         open={adding || !!editing}
         onClose={() => { setAdding(false); setEditing(null); }}
         editing={editing}
         profiles={profiles}
+        accounts={accountsRaw}
       />
 
       <ConfirmDialog
@@ -101,7 +133,56 @@ export default function Accounts() {
   );
 }
 
-function AccountEditor({ open, onClose, editing, profiles }) {
+function SortableAccountRow({ account: a, onEdit, onDelete }) {
+  const {
+    attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging
+  } = useSortable({ id: a.id });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    zIndex: isDragging ? 30 : undefined
+  };
+  const Icon = TYPES.find((t) => t.value === a.type)?.icon ?? Landmark;
+  return (
+    <li ref={setNodeRef} style={style} className={cn(isDragging && 'opacity-80')}>
+      <Card className="p-3">
+        <div className="flex items-center gap-3">
+          <button
+            ref={setActivatorNodeRef}
+            className="fs-btn-ghost px-1 -ml-1 cursor-grab active:cursor-grabbing touch-none text-muted-fg"
+            aria-label={`Reorder ${a.name}`}
+            {...attributes}
+            {...listeners}
+          >
+            <GripVertical className="w-4 h-4" />
+          </button>
+          <span
+            className="w-10 h-10 rounded-xl inline-flex items-center justify-center"
+            style={{ background: (a.color ?? '#22d3ee') + '22', color: a.color ?? '#22d3ee' }}
+          >
+            <Icon className="w-5 h-5" />
+          </span>
+          <div className="flex-1 min-w-0">
+            <p className="font-medium text-sm">{a.name}</p>
+            <p className="text-xs text-muted-fg">
+              {maskNumber(a.number)} · {formatINR(getAccountBalance(a, null), { hidePaise: true })}
+            </p>
+          </div>
+          <span className="fs-chip text-[10px] uppercase">{a.type}</span>
+          <button className="fs-btn-ghost" onClick={onEdit}><Edit3 className="w-4 h-4" /></button>
+          <button className="fs-btn-ghost text-danger" onClick={onDelete}><Trash2 className="w-4 h-4" /></button>
+        </div>
+        {(a.aliases ?? []).length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {a.aliases.map((al) => <span key={al} className="fs-chip">{al}</span>)}
+          </div>
+        )}
+      </Card>
+    </li>
+  );
+}
+
+function AccountEditor({ open, onClose, editing, profiles, accounts = [] }) {
   const { success, error } = useToast();
   const [form, setForm] = useState(blank());
 
@@ -191,8 +272,16 @@ function AccountEditor({ open, onClose, editing, profiles }) {
         profileIds: form.profileIds.map(Number),
         aliases: form.aliases
       };
-      if (editing) await db.accounts.update(editing.id, payload);
-      else await db.accounts.add(payload);
+      if (editing) {
+        await db.accounts.update(editing.id, payload);
+      } else {
+        // Append: place new accounts at the end of the user's custom order.
+        const maxOrder = (accounts ?? []).reduce(
+          (m, a) => Math.max(m, a.sortOrder ?? a.id ?? 0),
+          -1
+        );
+        await db.accounts.add({ ...payload, sortOrder: maxOrder + 1 });
+      }
       success(editing ? 'Account updated' : 'Account added');
       onClose?.();
     } catch (e) {

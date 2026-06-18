@@ -162,6 +162,63 @@ export function inferInvestmentPlatform(subCategoryName) {
   return PLATFORM_FROM_SUBCAT[String(subCategoryName).toLowerCase().trim()] ?? 'Other';
 }
 
+// Stable account ordering: respect an explicit `sortOrder` when present,
+// otherwise fall back to insertion order (the auto-increment id). Used
+// everywhere accounts are listed so a user's drag-to-reorder sticks.
+export function accountSort(accounts) {
+  return [...(accounts ?? [])].sort((a, b) => (a.sortOrder ?? a.id) - (b.sortOrder ?? b.id));
+}
+
+// Build the set of category ids that represent "Transfer" — the top-level
+// Transfer category plus all of its sub-categories. Charts/sums exclude these
+// so internal money movement doesn't distort income/expense or spend totals.
+export function transferCategoryIds(categories) {
+  const ids = new Set();
+  const top = (categories ?? []).find(
+    (c) => c.parentId == null && c.name?.toLowerCase() === 'transfer'
+  );
+  if (top) {
+    ids.add(top.id);
+    for (const c of categories) {
+      if (c.parentId === top.id) ids.add(c.id);
+    }
+  }
+  return ids;
+}
+
+// ── Time bucketing (for Home charts) ────────────────────────────────────────
+// Collapse a timestamp to the start-of-bucket epoch ms for 'day' | 'week' |
+// 'month'. Weeks start on Monday (Indian convention). Pure + synchronous so it
+// can drive grouping in tight loops.
+export function bucketStart(ts, granularity = 'month') {
+  const d = new Date(ts);
+  d.setHours(0, 0, 0, 0);
+  if (granularity === 'day') {
+    return d.getTime();
+  }
+  if (granularity === 'week') {
+    const day = d.getDay(); // 0 = Sun … 6 = Sat
+    const diff = (day + 6) % 7; // days since Monday
+    d.setDate(d.getDate() - diff);
+    return d.getTime();
+  }
+  // month
+  d.setDate(1);
+  return d.getTime();
+}
+
+// Human label for a bucket start (Indian formatting).
+export function bucketLabel(ts, granularity = 'month') {
+  const d = new Date(ts);
+  if (granularity === 'day') {
+    return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
+  }
+  if (granularity === 'week') {
+    return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
+  }
+  return d.toLocaleDateString('en-IN', { month: 'short', year: '2-digit' });
+}
+
 // Returns the new `balances` object to persist after a transaction. Use with
 // `db.accounts.update(account.id, { balances: ... , balance: undefined })`.
 export function applyTxnDeltaToBalances(account, profileId, delta) {
