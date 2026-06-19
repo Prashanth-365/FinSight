@@ -7,14 +7,15 @@ import { Card, CardBody } from '@/components/ui/Card.jsx';
 import { EmptyState } from '@/components/ui/Empty.jsx';
 import { Avatar } from '@/components/ui/Avatar.jsx';
 import { formatINR, formatINRShort } from '@/lib/currency.js';
-import { fmtDate, maskNumber, cn, getAccountBalance, accountSort } from '@/lib/utils.js';
-import { useOutletContext, Link } from 'react-router-dom';
+import { fmtDate, maskNumber, cn, deriveAccountBalance, computeAccountEffects, accountSort } from '@/lib/utils.js';
+import { useOutletContext, Link, useNavigate } from 'react-router-dom';
 import HomeCharts from '@/components/home/HomeCharts.jsx';
 
 const ACCOUNT_ICONS = { bank: Landmark, card: CreditCard, wallet: Wallet };
 
 export default function Home() {
   const { openAdd } = useOutletContext() ?? {};
+  const navigate = useNavigate();
   const { activeProfileId, isMasterView, activeProfile, profiles } = useProfile();
   const [show, setShow] = useState(false);
   const [recentCount, setRecentCount] = useState(10);
@@ -45,22 +46,30 @@ export default function Home() {
     return txns.filter((t) => t.profileId === activeProfileId);
   }, [txns, isMasterView, activeProfileId]);
 
+  // Live per-account effect of all transactions; account balances are derived
+  // from this (opening + Σ effects) so they recompute on ANY db change.
+  const accountEffects = useMemo(() => computeAccountEffects(txns), [txns]);
+
   // assets vs liabilities
   const { bank, liabilities, invested } = useMemo(() => {
     let bank = 0, liabilities = 0;
     for (const a of filteredAccounts) {
-      const bal = getAccountBalance(a, activeProfileId);
+      const bal = deriveAccountBalance(a, accountEffects.get(a.id), activeProfileId);
       if (a.type === 'card') liabilities += Math.max(0, -bal); // negative bal on card = outstanding
       else bank += bal;
     }
     let invested = 0;
     for (const i of filteredInv) invested += Number(i.investedAmount ?? 0);
     return { bank, liabilities, invested };
-  }, [filteredAccounts, filteredInv, activeProfileId]);
+  }, [filteredAccounts, filteredInv, activeProfileId, accountEffects]);
 
   const netWorth = bank + invested - liabilities;
 
   const recents = filteredTxns.slice(0, recentCount);
+
+  // Tapping an account card opens Transactions filtered to that account.
+  const openAccount = (a) =>
+    navigate('/transactions', { state: { filters: { accountId: String(a.id) } } });
 
   return (
     <div className="space-y-4 animate-fade-in">
@@ -121,7 +130,12 @@ export default function Home() {
               return (
                 <div
                   key={a.id}
-                  className="shrink-0 w-64 fs-card p-4 flex flex-col gap-2"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => openAccount(a)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openAccount(a); } }}
+                  title={`View ${a.name} transactions`}
+                  className="shrink-0 w-64 fs-card p-4 flex flex-col gap-2 cursor-pointer hover:border-primary/60 hover:shadow-card transition-colors"
                   style={{ borderTop: `3px solid ${a.color ?? 'rgb(var(--primary))'}` }}
                 >
                   <div className="flex items-center justify-between">
@@ -144,7 +158,7 @@ export default function Home() {
                       Balance{!isMasterView ? ` · ${activeProfile?.name ?? ''}` : ''}
                     </p>
                     <p className="text-lg font-semibold">
-                      {show ? formatINR(getAccountBalance(a, activeProfileId), { hidePaise: true }) : '••••••'}
+                      {show ? formatINR(deriveAccountBalance(a, accountEffects.get(a.id), activeProfileId), { hidePaise: true }) : '••••••'}
                     </p>
                   </div>
                 </div>

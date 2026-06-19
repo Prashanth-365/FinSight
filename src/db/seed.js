@@ -1,4 +1,5 @@
 import { db, getSetting, setSetting } from './database.js';
+import { ensureOpeningBalances } from './txnEffects.js';
 import { txnFingerprint } from '@/lib/utils.js';
 
 const DEFAULT_CATEGORIES = [
@@ -34,6 +35,8 @@ export async function seedIfEmpty() {
   }
 
   await backfillFingerprints();
+  // Migrate accounts to derived balances (opening balance + Σ effects).
+  await ensureOpeningBalances();
 }
 
 // One-time backfill: give pre-v4 transactions an importFingerprint so the

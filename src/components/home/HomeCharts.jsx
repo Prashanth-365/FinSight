@@ -4,13 +4,14 @@ import {
   BarChart, Bar, XAxis, YAxis, ReferenceLine, Tooltip, LabelList, Cell,
   PieChart, Pie, ResponsiveContainer
 } from 'recharts';
-import { BarChart3, PieChart as PieIcon } from 'lucide-react';
+import { BarChart3, PieChart as PieIcon, ChevronRight } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { db } from '@/db/database.js';
 import { useProfile } from '@/context/ProfileContext.jsx';
 import { Card } from '@/components/ui/Card.jsx';
 import { Select } from '@/components/ui/Select.jsx';
 import { formatINR, formatINRShort } from '@/lib/currency.js';
-import { bucketStart, bucketLabel, transferCategoryIds, cn } from '@/lib/utils.js';
+import { bucketStart, bucketLabel, transferCategoryIds, tsToLocalISO, cn } from '@/lib/utils.js';
 
 // Fixed chart colours (close to the success/danger theme vars in both modes).
 const GREEN = '#10b981';
@@ -245,6 +246,7 @@ function parseMonth(value) {
 }
 
 function CategoryDonut({ isMasterView, activeProfileId, transferIds, catById }) {
+  const navigate = useNavigate();
   const [mode, setMode] = useState('month');     // 'month' | 'year'
   const [preset, setPreset] = useState('this');  // 'this' | 'previous' | 'custom'
   const [fromMonth, setFromMonth] = useState('');
@@ -321,6 +323,20 @@ function CategoryDonut({ isMasterView, activeProfileId, transferIds, catById }) 
     { value: 'custom', label: 'Custom' }
   ];
 
+  // Tapping a legend row opens Transactions filtered to that category over the
+  // donut's currently-selected date range (mapped to concrete from/to dates).
+  const openCategory = (d) => {
+    navigate('/transactions', {
+      state: {
+        filters: {
+          categoryId: typeof d.id === 'number' ? String(d.id) : '',
+          from: tsToLocalISO(range[0]).slice(0, 10),
+          to: tsToLocalISO(range[1]).slice(0, 10)
+        }
+      }
+    });
+  };
+
   return (
     <Card className="p-4">
       <div className="flex items-center justify-between gap-2 mb-3">
@@ -391,15 +407,23 @@ function CategoryDonut({ isMasterView, activeProfileId, transferIds, catById }) 
             </div>
           </div>
 
-          <ul className="space-y-1.5 max-h-[200px] overflow-y-auto hide-scrollbar pr-1">
+          <ul className="space-y-0.5 max-h-[200px] overflow-y-auto hide-scrollbar pr-1">
             {rows.map((d) => {
               const pct = total > 0 ? (d.value / total) * 100 : 0;
               return (
-                <li key={d.id} className="flex items-center gap-2 text-sm">
-                  <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: d.color }} />
-                  <span className="flex-1 truncate">{d.icon} {d.name}</span>
-                  <span className="tabular-nums">{formatINR(d.value, { hidePaise: true })}</span>
-                  <span className="text-muted-fg tabular-nums w-11 text-right">{pct.toFixed(1)}%</span>
+                <li key={d.id}>
+                  <button
+                    type="button"
+                    onClick={() => openCategory(d)}
+                    className="group w-full flex items-center gap-2 text-sm rounded-lg px-1.5 py-1 hover:bg-muted/60 transition-colors text-left"
+                    title={`View ${d.name} transactions for this period`}
+                  >
+                    <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: d.color }} />
+                    <span className="flex-1 truncate">{d.icon} {d.name}</span>
+                    <span className="tabular-nums">{formatINR(d.value, { hidePaise: true })}</span>
+                    <span className="text-muted-fg tabular-nums w-11 text-right">{pct.toFixed(1)}%</span>
+                    <ChevronRight className="w-3.5 h-3.5 text-muted-fg opacity-0 group-hover:opacity-100 shrink-0" />
+                  </button>
                 </li>
               );
             })}

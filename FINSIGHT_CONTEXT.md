@@ -15,6 +15,7 @@ repo — I push from my own environment. Don't assume `git`/`npm` run locally.)
 - Tailwind (CSS-variable theming, dark/light), hand-rolled shadcn-style UI primitives
 - Dexie.js (IndexedDB) + dexie-react-hooks (`useLiveQuery`)
 - bcryptjs (local master password), Recharts (charts), lucide-react (icons)
+- @dnd-kit/core + /sortable + /utilities (drag-to-reorder accounts)
 - vite-plugin-pwa (manifest + service worker)
 - Capacitor 6 for the APK; custom Kotlin plugins for SMS + biometrics
 - @capacitor/filesystem (file export), @capacitor/app (hardware back, deep links)
@@ -35,15 +36,21 @@ repo — I push from my own environment. Don't assume `git`/`npm` run locally.)
 - Money: `src/lib/currency.js` → `formatINR`, `formatINRShort` (lakh/crore), `formatPercent`.
   Always Indian formatting.
 - Utils `src/lib/utils.js`: `cn`, `freqSorted`, `tsToLocalISO`/`todayLocalISO`, `fmtDate`/
-  `fmtDateTime`, `maskNumber`, `uid`, `aliasMatchesAccountNumber`, `getAccountBalance`,
-  `applyTxnDeltaToBalances`, `inferInvestmentPlatform`, `txnFingerprint`.
+  `fmtDateTime`, `maskNumber`, `uid`, `aliasMatchesAccountNumber`, `computeAccountEffects`/
+  `deriveAccountBalance` (derived balances — see invariant below; `getAccountBalance` remains
+  only as the legacy reader), `inferInvestmentPlatform`, `txnFingerprint`, `accountSort`,
+  `transferCategoryIds`, `bucketStart`/`bucketLabel` (day/week-Monday/month).
 
 ## Data model (Dexie, current version = 5)
 Tables: `users`, `profiles`, `accounts`, `categories`, `transactions`, `investments`,
 `chitFunds`, `smsQueue`, `statements`, `settings` (key-value).
 - **accounts**: `{ name, type: bank|card|wallet, number, aliases:[masked], color, isActive,
-  profileIds:[], balances:{ [profileId]: number } }`. Per-profile balances via
-  `getAccountBalance`/`applyTxnDeltaToBalances`. *(Item 4 will add `sortOrder`.)*
+  profileIds:[], openingBalances:{ [profileId]: number }, sortOrder }`. Per-profile balances
+  are **DERIVED** (`openingBalance + Σ txn effects`), never stored as a running total — see the
+  invariant below. (`balances`/`balance` are legacy fields, migrated to `openingBalances` on
+  load by `ensureOpeningBalances`; old backups are backfilled on restore.) `sortOrder` (added
+  v0.2.5) drives drag-to-reorder; sorted in JS via `accountSort` (no Dexie index).
+  `openingBalances` is not indexed, so no Dexie version bump was needed (still version 5).
 - **categories**: `{ name, parentId(null=top), icon, color, type: expense|income|investment|transfer }`.
   Tree. Rename-to-existing = MERGE. Seeded set includes a **Transfer** top-level category.
 - **transactions**: `{ slNo, dateTime, profileId, accountId, categoryId, subCategoryId,
@@ -61,12 +68,30 @@ Tables: `users`, `profiles`, `accounts`, `categories`, `transactions`, `investme
   `{ rawSms, parsedData:{amount,txnType,aliasGuess,date,description?}, status: pending|processed|
   dismissed, dateTime, linkedTxnId, nativeId, source, kind: 'sms'|'statement', accountId }`.
 
-## CRITICAL invariant — transaction effects
-All balance + invested-amount bookkeeping lives in **`src/db/txnEffects.js`**:
-`applyTransactionEffects(txn, +1|-1)`, `deleteTransaction(id)`, `deleteTransactions(ids)`.
-Any code that creates/edits/deletes transactions MUST route balance/invested changes
-through these. Edit = reverse old (`-1`) then apply new (`+1`). For investment-linked txns
-it now only adjusts the holding's `investedAmount` (no units/currentValue).
+## CRITICAL invariant — balances are DERIVED (single source of truth)
+**Account balances are computed live from the transactions table, never stored.** An account's
+current balance for a profile = `openingBalances[profileId] + Σ effects` where a credit adds and
+a debit subtracts (`utils.computeAccountEffects(txns)` → `Map<accountId,{[pid]:delta}>`, then
+`utils.deriveAccountBalance(account, accountEffects, profileId|null)`; `profileId == null` sums
+all profiles for the master view). Every screen reads this via `useLiveQuery(db.transactions…)` +
+a `useMemo`, so balances + net worth recompute on **any** DB change — no matter which path (single
+add/edit/delete, bulk edit incl. profile change, bulk delete, SMS convert, import/restore) caused
+it. There is no per-path balance adjustment to forget. (This replaced a stored running-balance
+model where the multiselect bulk-edit and delete paths bypassed the recalc and left balances stale.)
+
+`src/db/txnEffects.js` now owns only what can't be purely derived:
+- `applyTransactionEffects(txn, +1|-1)` — adjusts a linked **investment's `investedAmount`** only
+  (a hybrid: also set by hand in `InvestmentForm`, so not derivable). Edit = reverse old (`-1`)
+  then apply new (`+1`).
+- `deleteTransaction(id)` / `deleteTransactions(ids)` — reverse effects, delete, reindex.
+- `updateTransactions(ids, patch|fn)` — the bulk-edit service: per row, reverse old effect →
+  write patch → apply new effect (keeps investment amounts right; balances re-derive for free).
+- `ensureOpeningBalances()` — idempotent migration: any account lacking `openingBalances` gets
+  `opening = currentStoredBalance − Σ effects`, preserving its displayed total exactly
+  (`derived = opening + effects = current`). Runs on app load (`seed.js`) and after import
+  (`backup.js`). Settings → Accounts edits the **current** balance and stores `opening = entered − effects`.
+The Settings → Accounts editor, Home (cards + net worth), and the TransactionSheet account picker
+all read balances through `deriveAccountBalance`.
 
 ## Reconciliation / dedup
 - `src/lib/reconcile.js`: multiplicity-aware, **description-free** matching keyed on
@@ -93,9 +118,15 @@ it now only adjusts the holding's `investedAmount` (no units/currentValue).
 2. **Profiles**: header switcher; master "All profiles" view (id=null).
 3. **Home**: single **Net Worth** section — headline `(bank + invested) − liabilities`, with
    three components below: Bank/Wallets, Invested, Liabilities (card outstanding). Per-account
-   cards (eye-toggle), recent txns. *(Item 5 will add charts below recents.)*
+   cards (eye-toggle, drag-ordered via `accountSort`; **tap a card → Transactions filtered to
+   that account**), recent txns, then **dashboard charts** (`HomeCharts.jsx`): diverging
+   cash-flow bars + category-spend donut whose **legend rows are tappable → Transactions filtered
+   to that category over the donut's active date range** (see v0.2.5 + v0.2.6 entries).
 4. **Transactions**: filters drawer (Sheet), infinite scroll, tap → detail, long-press →
-   multi-select + bulk-edit, delete reverses effects.
+   multi-select + bulk-edit, delete. Balances re-derive automatically (no per-path recalc).
+   **Active-filter chips** above the list show every applied filter and clear individually (+
+   "Clear all"). Initializes its filter state from inbound `location.state.filters` (set by the
+   Home card / donut-legend taps), applies it immediately, then clears the history state.
 5. **Transaction entry** (`TransactionSheet.jsx`): auto-suggest comboboxes; investment
    auto-link (category type=investment → holding picker creates/links an investment, adjusting
    its investedAmount); **splits** (equal auto-split on add/toggle; names suggest profiles +
@@ -136,27 +167,42 @@ it now only adjusts the holding's `investedAmount` (no units/currentValue).
   runs after `npx cap add android`: copies Kotlin plugins (SmsReader, BiometricAuth,
   **FileExport**) + MainActivity, adds permissions (SMS, notifications, foreground-service,
   biometric, **WRITE/READ_EXTERNAL_STORAGE**), deep-link intent-filters, the service decl,
-  kotlin-android plugin, androidx.biometric.
+  kotlin-android plugin, androidx.biometric, **and a fixed release `signingConfig` +
+  CI-driven `versionCode`/`versionName`** (so every APK shares one signature and installs
+  in-place — see CLAUDE.md → Android signing).
 - JS bridges: `src/lib/smsNative.js`, `src/lib/biometric.js`, `src/lib/fileExport.js` (no-op /
   throw on web; gate on `Capacitor.getPlatform()==='android'`).
 
 ## Deployment
 - Web: push to `main` → Vercel (Vite). Env: `VITE_GOOGLE_CLIENT_ID`, `VITE_OAUTH_REDIRECT_URL`.
 - APK: `.github/workflows/build-apk.yml` (Node + JDK17 + Android SDK; `npm install`,
-  `npx cap add android`, patch script, `cap sync`, `gradlew assembleDebug`). No npm lockfile.
+  `npx cap add android`, decode keystore → patch script → `cap sync` → `gradlew assembleRelease`,
+  signed with one fixed keystore so updates install in-place, `versionCode` = CI run number).
+  Output `out/finsight.apk`. Requires the `ANDROID_KEYSTORE_B64` / `ANDROID_KEYSTORE_PASSWORD` /
+  `ANDROID_KEY_ALIAS` / `ANDROID_KEY_PASSWORD` secrets — see CLAUDE.md → Android signing. No npm
+  lockfile (`package-lock.json` is gitignored; CI installs fresh).
+- **Dependency toolchain (pinned to React 18 / Vite 5).** Because there's no committed lockfile,
+  `package.json` has an `overrides` block (`"react": "$react"`, `"react-dom": "$react-dom"`) that
+  forces a single React 18 across the whole transitive tree — without it a fresh `npm install`
+  could hoist a stray React 19 and throw `ERESOLVE`. Do **not** bump `@vitejs/plugin-react` to v6+
+  (its peer is `vite@^8`) or `vite`/`tailwind`/`react` to their next majors without a deliberate
+  framework migration — that's the conflict behind "couldn't update — conflicts in packages". See
+  the v0.2.6 entry.
 
 ═══════════════════════════════════════════════════════════════════════
 ## CHANGE LOG — this session's batch ("Implement in order")
 ═══════════════════════════════════════════════════════════════════════
 
 ### ✅ DONE
+_(Items 1–3 shipped in **v0.2.4**; items 4–5 shipped in **v0.2.5** — both pushed to `origin/main` and tagged. See per-release entries below for the condensed summaries.)_
+
 **1. Android export → `finsite/`**: `exportToFile()` (Filesystem on Android, Blob on web) +
    storage perms in the patch script + `@capacitor/filesystem` in package.json. Data.jsx toasts
    the saved path.
-   ⚠️ Caveat: `Directory.External` writes to the app's external storage
-   (`Android/data/com.finsight.app/files/finsite/`) — reliable & permission-free, but NOT the
-   *public* Downloads folder. True public-Downloads on Android 10+ needs MediaStore (fragile);
-   ask the user if they want that instead.
+   ✅ UPDATE (v0.2.4): now writes to the **public** `Download/finsite/` folder via the native
+   `FileExport` plugin (MediaStore on API 29+, legacy direct write on API ≤28) so exports show
+   in the Downloads app & Recent files; falls back to `Directory.External` if MediaStore fails.
+   See the v0.2.4 session entry below.
 
 **2. Removed ALL price/NAV tracking**: deleted pricing API usage (`pricing.js` stubbed);
    investments no longer use units/currentValue; HoldingDetail shows invested/date/orders/
@@ -191,7 +237,142 @@ it now only adjusts the holding's `investedAmount` (no units/currentValue).
 
 ### ⏳ PENDING — implement next (start here in the new chat)
 
-_(none — items 1–5 of this batch are complete.)_
+_(none — items 1–5 of this batch are complete; items 4–5 pushed to `origin/main`, tagged `v0.2.5`.)_
+
+═══════════════════════════════════════════════════════════════════════
+## CHANGE LOG — v0.2.6 (derived balances + dep fix + click-to-filter)
+═══════════════════════════════════════════════════════════════════════
+
+### ✅ DONE — validated locally (clean `npm install` + `npm run build` + Vite preview e2e)
+
+**1. Dependency conflict ("couldn't update — conflicts in packages").** The hard `ERESOLVE` was
+`@vitejs/plugin-react@6` (what "update to latest" pulls) peer-requiring `vite@^8` while the project
+is pinned to `vite@^5`. Because there's no committed lockfile, a fresh `npm install` could also
+hoist a transitive `react@19` (the `ERESOLVE overriding peer dependency` churn from dnd-kit /
+react-router / recharts). **Fix (root cause, not `--force`):** kept the toolchain aligned on the
+supported **React 18 / Vite 5** line (a jump to Vite 8 / React 19 / Tailwind 4 is an unrequested,
+breaking framework migration), and added an **`overrides`** block (`"react": "$react"`,
+`"react-dom": "$react-dom"`) so the lockfile-less CI/Vercel install resolves a single React 18
+deterministically. Bumped `@vitejs/plugin-react` to `^4.3.4` (still v4). `package-lock.json` added
+to `.gitignore`. Verified: `rm -rf node_modules package-lock.json && npm install` (no ERESOLVE),
+`npm run build` (ok), `npm update` (exit 0).
+
+**2. Balances are now a DERIVED single source of truth** (fixes "balances not updating on bulk-edit
+and delete"). Root cause: the old model stored a running balance and mutated it per-path; the
+multiselect **bulk-edit** wrote `db.transactions.update` directly and the delete paths reversed a
+possibly-never-applied effect, so balances drifted. Rebuilt per the invariant section above:
+- `utils.js`: new `computeAccountEffects` + `deriveAccountBalance`; removed `applyTxnDeltaToBalances`.
+- `txnEffects.js`: dropped the account-balance mutation (kept investment `investedAmount`); added
+  `updateTransactions` (bulk-edit service: reverse→patch→apply) and `ensureOpeningBalances`
+  (idempotent `opening = current − Σeffects` migration; preserves displayed totals exactly).
+- New accounts store `openingBalances`; the Settings → Accounts editor reads/writes the **current**
+  balance and back-solves opening. Home (net worth + cards), the TransactionSheet picker and the
+  Accounts list all read `deriveAccountBalance` off a live `useMemo(computeAccountEffects(txns))`.
+- Migration wired into `seed.seedIfEmpty` (app load) and `backup.restoreAll` (after import).
+- **Audited every mutation path** — single add/edit (TransactionSheet), single+bulk delete, bulk
+  edit (incl. profile change), SMS→txn convert, import/restore: all now stay consistent because the
+  balance is recomputed from the transactions table on every change.
+
+**3. Additional bug found & fixed.** The old bulk-edit also bypassed investment bookkeeping, so a
+bulk `txnType` flip on an investment-linked row left `investedAmount` wrong — now routed through
+`updateTransactions` (reverse+apply). Verified consistent (no change needed): donut + cash-flow bars
+both exclude `categoryId ∈ transferCategoryIds`; category merge/rename and import/restore already
+propagate via `useLiveQuery` (no cached aggregates remain besides the now-derived balance).
+
+**4 & 5. Click-to-filter navigation.** Tapping a donut **legend row** (`HomeCharts.jsx`) navigates
+to `/transactions` with `{ state: { filters: { categoryId, from, to } } }` (the donut's active
+period → concrete `from`/`to` dates). Tapping a Home **account card** navigates with
+`{ filters: { accountId } }`. `Transactions.jsx` initializes its filter state from
+`location.state.filters` (replacing the whole set over `EMPTY_FILTERS`), applies it immediately,
+clears the history state, and renders a new clearable **active-filter chip bar** (`ActiveFilters`).
+
+**E2E verified** in the Vite preview: master ₹1,050 / Alice ₹550 / Bob ₹500 derived correctly;
+bulk-moving Alice's txns→Bob updated both live (Alice→₹1,000, Bob→₹50); delete updated live
+(Bob→₹350); account-card and donut-legend taps applied the right filters + chips; a seeded legacy
+account (`balances`, no `openingBalances`) migrated to `openingBalances` while its displayed total
+stayed identical.
+
+═══════════════════════════════════════════════════════════════════════
+## CHANGE LOG — v0.2.5 (reorderable accounts + Home dashboard charts)
+═══════════════════════════════════════════════════════════════════════
+
+### ✅ DONE — pushed to `origin/main`, tagged `v0.2.5`
+Implements batch items **4 (reorderable accounts)** and **5 (Home dashboard charts)**.
+Commit `3c3303f` — 9 files changed (8 modified + 1 new), +653 / −78.
+
+**Reorderable accounts (drag-and-drop).**
+- **`package.json`**: added `@dnd-kit/core` ^6.1.0, `@dnd-kit/sortable` ^8.0.0,
+  `@dnd-kit/utilities` ^3.2.2 (resolved by CI/Vercel `npm install`; no local node_modules).
+- **`src/lib/utils.js`**: new `accountSort(accounts)` →
+  `(a.sortOrder ?? a.id) - (b.sortOrder ?? b.id)` (stable, no Dexie index).
+- **`src/pages/Settings/Accounts.jsx`**: list wrapped in dnd-kit `DndContext` +
+  `SortableContext` (verticalListSortingStrategy); `SortableAccountRow` with a `GripVertical`
+  activator handle (`setActivatorNodeRef`); Pointer/Touch/Keyboard sensors (small activation
+  distance so Edit/Delete still tap). `onDragEnd` `arrayMove`s an optimistic local order then
+  persists `sortOrder = index` for all rows in one `db.transaction('rw', db.accounts, …)`. New
+  accounts append with `sortOrder = max(existing sortOrder ?? id) + 1` (editor now receives
+  `accounts`).
+- **`accountSort` applied at every listing site**: Home cards (`filteredAccounts`),
+  `TransactionSheet` options, `Transactions` top filter select + `BulkEditModal` select,
+  `StatementImportModal` select, and the Accounts settings list itself.
+
+**Home dashboard charts (`src/components/home/HomeCharts.jsx`, new).** Mounted below Recent
+Transactions in `src/pages/Home.jsx`; profile-aware (ProfileContext), Indian ₹. Helpers added
+to `src/lib/utils.js`: `transferCategoryIds(categories)` (top-level "Transfer" + children id
+set) and `bucketStart`/`bucketLabel` (day / week-from-Monday / month).
+- **Chart A — diverging cash-flow bars**: Daily/Weekly/Monthly toggle; credits UP (green),
+  debits DOWN (stored negative, red) from Recharts `ReferenceLine y={0}`; NET labelled per
+  bucket via a custom `LabelList`. Transfer excluded. Horizontally scrollable, newest bucket on
+  the RIGHT; scroll-left lazily widens the Dexie window
+  (`where('dateTime').aboveOrEqual(windowStart)`) in pages, restoring scroll position via
+  `useLayoutEffect`, until the earliest (profile-aware) txn is reached.
+- **Chart B — category spend donut**: Recharts `PieChart` + `Pie innerRadius`; Monthly/Yearly
+  modes with this / previous / custom (month(s)/range or year(s)/range); center shows total
+  spend; legend lists each category's ₹ amount + % of total. Transfer excluded; debits only.
+- ⚠️ Validated via the language service (`get_errors`) only — there is no local Node/`npm`, so
+  the full Vite build runs on Vercel; the new `@dnd-kit/*` deps install there.
+
+═══════════════════════════════════════════════════════════════════════
+## CHANGE LOG — v0.2.4 (export to public Downloads)
+═══════════════════════════════════════════════════════════════════════
+
+### ✅ DONE — pushed to `origin/main`, tagged `v0.2.4`
+**Public-Downloads export (fixes "export not in Recent files").** The old export used
+`@capacitor/filesystem` `Directory.External`, which lands in the app's *private* external
+storage (`Android/data/com.finsight.app/files/finsite/`) — hidden from the Downloads app and
+media index. Now exports go to the **public** `Download/finsite/` folder.
+- **New `android-patches/FileExportPlugin.kt`** (`@CapacitorPlugin(name="FileExport")`) with
+  `saveToDownloads({ fileName, data, subDir, mimeType })`: MediaStore Downloads collection on
+  API 29+ (no runtime permission, indexed immediately, `IS_PENDING` flip); legacy
+  `Environment.DIRECTORY_DOWNLOADS` write on API ≤28.
+- **New `src/lib/fileExport.js`** JS bridge (`registerPlugin('FileExport', …)`; web stub
+  throws so callers fall back to Blob download).
+- **`src/lib/backup.js`** `exportToFile()` tries `saveToDownloads(...)` first (→
+  `Download/finsite/finsite-backup-<ts>.json`) and **falls back** to the old `Directory.External`
+  write if MediaStore throws (export never hard-fails).
+- **`android-patches/MainActivity.java`** registers `FileExportPlugin`.
+- **`android-patches/apply-patches.mjs`** copies `FileExportPlugin.kt` into the package folder
+  (added to the plugin-sources loop). No new permissions needed (existing
+  `WRITE_EXTERNAL_STORAGE maxSdkVersion=28` covers legacy; API 29+ needs none for MediaStore).
+- **`src/pages/Settings/Data.jsx`** toast now reads `Saved to Downloads → …`.
+- **`.gitignore`** now ignores `.vs/` (Visual Studio folder).
+- ⚠️ Kotlin plugin only runs in the APK (built by GitHub Actions) — verify on a device that the
+  file appears in **Downloads → finsite** and Recent files.
+
+### ⚠️ KNOWN ISSUE / SETUP — Drive sign-in needs `VITE_OAUTH_REDIRECT_URL`
+Symptom: signing in for Drive sync errors with *"OAuth redirect URL not configured. Set
+`VITE_OAUTH_REDIRECT_URL` to your Vercel URL + /oauth-redirect.html."* This is **config, not a
+code bug** — `nativeRequestToken()` in `src/lib/googleAuth.js` requires `ENV_REDIRECT_URL`.
+- The Android OAuth flow (Chrome Custom Tab → `oauth-redirect.html` → deep link
+  `com.finsight.app://oauth-success#access_token=…`) needs a **publicly hosted**
+  `oauth-redirect.html` (the file lives at `public/oauth-redirect.html`, served by Vercel).
+- **Fix:** set env var `VITE_OAUTH_REDIRECT_URL = https://<your-vercel-host>/oauth-redirect.html`
+  for BOTH the Vercel web build and the GitHub Actions APK build (it's compiled into the bundle
+  at build time, so the APK must be rebuilt after setting it). Also set `VITE_GOOGLE_CLIENT_ID`.
+- In Google Cloud Console, add that exact redirect URL to the OAuth Client's authorized redirect
+  URIs and enable the Drive API.
+- Web fallback: if unset, `googleAuth.js` defaults to `${window.location.origin}/oauth-redirect.html`
+  (works for the web build, but the APK has no web origin, hence the explicit env var requirement).
 
 ### General constraints (unchanged)
 - Keep auth, profiles, alias mapping, auto-suggest, merge logic, SMS-queue foundation intact.

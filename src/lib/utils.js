@@ -128,8 +128,17 @@ export function isPositiveNumber(v) {
 }
 
 // Per-profile balance helpers ---------------------------------------------
-// Accounts now store balances as { [profileId]: number }. Legacy accounts
-// have a single `balance` field; we read it transparently and migrate on write.
+// Balances are DERIVED, not stored: an account's current balance for a profile
+// is its OPENING balance plus the net effect of every transaction on that
+// account+profile (credits add, debits subtract). The opening balance lives in
+// `account.openingBalances = { [profileId]: number }`; the running total is
+// recomputed live from the transactions table (see `deriveAccountBalance`).
+//
+// `getAccountBalance` survives only as the legacy reader for accounts that have
+// not yet been migrated to `openingBalances` (it returns the old stored
+// `balances`/`balance`, which held the current total). `ensureOpeningBalances`
+// converts those on app load / import; `deriveAccountBalance` falls back to it
+// until then so the displayed value never doubles up.
 
 export function getAccountBalance(account, profileId = null) {
   if (!account) return 0;
@@ -141,6 +150,51 @@ export function getAccountBalance(account, profileId = null) {
   }
   // legacy: single balance applies to whichever profile owns this txn
   return Number(account.balance ?? 0);
+}
+
+// Net signed effect of every transaction on each account+profile, as
+// Map<accountId, { [profileId]: number }>. A credit raises the balance, a
+// debit lowers it. Pure + synchronous so it can drive a useMemo over the live
+// transactions list and recompute on ANY database change.
+export function computeAccountEffects(txns) {
+  const map = new Map();
+  for (const t of txns ?? []) {
+    if (t.accountId == null) continue;
+    const amt = Number(t.amount ?? 0);
+    if (!amt) continue;
+    const delta = (t.txnType === 'credit' ? 1 : -1) * amt;
+    let acc = map.get(t.accountId);
+    if (!acc) { acc = {}; map.set(t.accountId, acc); }
+    const key = String(t.profileId);
+    acc[key] = (acc[key] ?? 0) + delta;
+  }
+  return map;
+}
+
+// Derived current balance for an account & profile.
+//   account       — the account record
+//   accountEffects— the `{ [profileId]: delta }` for THIS account (from
+//                   computeAccountEffects(...).get(account.id) ?? {})
+//   profileId     — a profile id, or null for the master ("all profiles") sum.
+// When the account has `openingBalances`, balance = opening + effects. When it
+// doesn't (legacy / not-yet-backfilled / old backup), we fall back to the old
+// stored total as-is (effects already baked in) so nothing double-counts.
+export function deriveAccountBalance(account, accountEffects, profileId = null) {
+  if (!account) return 0;
+  const ob = account.openingBalances && typeof account.openingBalances === 'object'
+    ? account.openingBalances
+    : null;
+  if (!ob) return getAccountBalance(account, profileId);
+
+  const eff = accountEffects ?? {};
+  if (profileId == null) {
+    const keys = new Set([...Object.keys(ob), ...Object.keys(eff)]);
+    let sum = 0;
+    for (const k of keys) sum += Number(ob[k] ?? 0) + Number(eff[k] ?? 0);
+    return sum;
+  }
+  const key = String(profileId);
+  return Number(ob[key] ?? 0) + Number(eff[key] ?? 0);
 }
 
 // Map a freeform sub-category name (e.g. "Mutual Fund") onto the canonical
@@ -219,19 +273,3 @@ export function bucketLabel(ts, granularity = 'month') {
   return d.toLocaleDateString('en-IN', { month: 'short', year: '2-digit' });
 }
 
-// Returns the new `balances` object to persist after a transaction. Use with
-// `db.accounts.update(account.id, { balances: ... , balance: undefined })`.
-export function applyTxnDeltaToBalances(account, profileId, delta) {
-  const key = String(profileId);
-  if (account?.balances && typeof account.balances === 'object') {
-    return {
-      ...account.balances,
-      [key]: Number(account.balances[key] ?? 0) + delta
-    };
-  }
-  // Promote legacy balance to the new shape, attributing the existing total
-  // to the profile that owns this transaction.
-  return {
-    [key]: Number(account?.balance ?? 0) + delta
-  };
-}

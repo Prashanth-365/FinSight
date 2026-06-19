@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { Plus, Edit3, Trash2, Wallet, CreditCard, Landmark, X, GripVertical } from 'lucide-react';
 import {
@@ -25,7 +25,7 @@ import { Field } from '@/components/ui/Input.jsx';
 import { Select } from '@/components/ui/Select.jsx';
 import { useToast } from '@/components/ui/Toast.jsx';
 import { SectionHeader } from './Profiles.jsx';
-import { maskNumber, cn, getAccountBalance, accountSort } from '@/lib/utils.js';
+import { maskNumber, cn, deriveAccountBalance, computeAccountEffects, accountSort } from '@/lib/utils.js';
 import { formatINR } from '@/lib/currency.js';
 import { Avatar } from '@/components/ui/Avatar.jsx';
 
@@ -40,6 +40,8 @@ const COLORS = ['#22d3ee', '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#a855f7'
 export default function Accounts() {
   const accountsRaw = useLiveQuery(() => db.accounts.toArray(), [], []);
   const profiles = useLiveQuery(() => db.profiles.toArray(), [], []);
+  const txns = useLiveQuery(() => db.transactions.toArray(), [], []);
+  const accountEffects = useMemo(() => computeAccountEffects(txns), [txns]);
   const [editing, setEditing] = useState(null);
   const [adding, setAdding] = useState(false);
   const [toDelete, setToDelete] = useState(null);
@@ -104,6 +106,7 @@ export default function Accounts() {
               <SortableAccountRow
                 key={a.id}
                 account={a}
+                effects={accountEffects.get(a.id)}
                 onEdit={() => setEditing(a)}
                 onDelete={() => setToDelete(a)}
               />
@@ -116,6 +119,7 @@ export default function Accounts() {
         open={adding || !!editing}
         onClose={() => { setAdding(false); setEditing(null); }}
         editing={editing}
+        effects={editing ? accountEffects.get(editing.id) : null}
         profiles={profiles}
         accounts={accountsRaw}
       />
@@ -133,7 +137,7 @@ export default function Accounts() {
   );
 }
 
-function SortableAccountRow({ account: a, onEdit, onDelete }) {
+function SortableAccountRow({ account: a, effects, onEdit, onDelete }) {
   const {
     attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging
   } = useSortable({ id: a.id });
@@ -165,7 +169,7 @@ function SortableAccountRow({ account: a, onEdit, onDelete }) {
           <div className="flex-1 min-w-0">
             <p className="font-medium text-sm">{a.name}</p>
             <p className="text-xs text-muted-fg">
-              {maskNumber(a.number)} · {formatINR(getAccountBalance(a, null), { hidePaise: true })}
+              {maskNumber(a.number)} · {formatINR(deriveAccountBalance(a, effects, null), { hidePaise: true })}
             </p>
           </div>
           <span className="fs-chip text-[10px] uppercase">{a.type}</span>
@@ -182,20 +186,26 @@ function SortableAccountRow({ account: a, onEdit, onDelete }) {
   );
 }
 
-function AccountEditor({ open, onClose, editing, profiles, accounts = [] }) {
+function AccountEditor({ open, onClose, editing, effects, profiles, accounts = [] }) {
   const { success, error } = useToast();
   const [form, setForm] = useState(blank());
 
   useEffect(() => {
     if (!open) return;
     if (editing) {
-      // Migrate legacy single-balance to per-profile balances on first edit.
-      const balances = editing.balances && typeof editing.balances === 'object'
-        ? { ...editing.balances }
-        : {};
-      if (!editing.balances && editing.balance != null && (editing.profileIds ?? []).length > 0) {
-        // attribute the existing single balance to the first linked profile
-        balances[String(editing.profileIds[0])] = Number(editing.balance);
+      // The balance inputs show the DERIVED CURRENT balance per profile
+      // (opening + Σ effects). On save we back the opening figure out again.
+      const eff = effects ?? {};
+      const ob = editing.openingBalances && typeof editing.openingBalances === 'object'
+        ? editing.openingBalances
+        : null;
+      const balances = {};
+      for (const pid of editing.profileIds ?? []) {
+        const key = String(pid);
+        balances[key] = ob
+          ? Number(ob[key] ?? 0) + Number(eff[key] ?? 0)
+          // legacy account not yet backfilled: old stored total per profile
+          : Number((editing.balances ?? {})[key] ?? editing.balance ?? 0);
       }
       setForm({
         ...blank(),
@@ -207,7 +217,7 @@ function AccountEditor({ open, onClose, editing, profiles, accounts = [] }) {
     } else {
       setForm(blank());
     }
-  }, [open, editing]);
+  }, [open, editing, effects]);
 
   function blank() {
     return {
@@ -255,18 +265,24 @@ function AccountEditor({ open, onClose, editing, profiles, accounts = [] }) {
     try {
       if (!form.name.trim()) throw new Error('Name required');
       if (form.profileIds.length === 0) throw new Error('Pick at least one profile');
-      // Coerce balances to numbers, only for currently selected profiles
-      const balances = {};
+      // The input holds the desired CURRENT balance per profile; store the
+      // OPENING balance (current − Σ effects) so the derived current matches
+      // exactly. For a new account there are no effects yet, so opening = current.
+      const eff = effects ?? {};
+      const openingBalances = {};
       for (const pid of form.profileIds) {
-        const n = Number(form.balances[String(pid)]);
-        balances[String(pid)] = isFinite(n) ? n : 0;
+        const key = String(pid);
+        const n = Number(form.balances[key]);
+        const current = isFinite(n) ? n : 0;
+        openingBalances[key] = current - Number(eff[key] ?? 0);
       }
       const payload = {
         name: form.name.trim(),
         type: form.type,
         number: form.number ?? '',
-        balances,
-        balance: null, // clear legacy field
+        openingBalances,
+        balances: null, // clear legacy stored running balance
+        balance: null,  // clear legacy single-balance field
         color: form.color,
         isActive: 1,
         profileIds: form.profileIds.map(Number),
@@ -352,8 +368,8 @@ function AccountEditor({ open, onClose, editing, profiles, accounts = [] }) {
 
       {form.profileIds.length > 0 && (
         <Field
-          label="Balance per profile (₹)"
-          hint="For credit cards, use a negative value if there's an outstanding balance"
+          label="Current balance per profile (₹)"
+          hint="The balance as of now; transactions adjust it automatically. For credit cards, use a negative value if there's an outstanding balance"
         >
           <div className="space-y-2">
             {form.profileIds.map((pid) => {

@@ -1,5 +1,6 @@
 // Orchestrates: dump DB → (optionally encrypt) → upload, and download → (decrypt if needed) → restore.
 import { db, reindexSlNo, setSetting } from '@/db/database.js';
+import { ensureOpeningBalances } from '@/db/txnEffects.js';
 import { Capacitor } from '@capacitor/core';
 import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
 import { encryptJson, decryptJson } from './crypto.js';
@@ -86,6 +87,10 @@ export async function restoreAll(payload) {
     }
   });
   await reindexSlNo();
+  // Older backups store the (now-legacy) running `balances`; backfill the
+  // opening balances so derived account balances are correct after a restore.
+  // Newer backups already carry `openingBalances` and are skipped.
+  await ensureOpeningBalances();
 }
 
 /**

@@ -8,7 +8,7 @@ import { Combobox } from '@/components/ui/Combobox.jsx';
 import { Select } from '@/components/ui/Select.jsx';
 import { useProfile } from '@/context/ProfileContext.jsx';
 import { useToast } from '@/components/ui/Toast.jsx';
-import { freqSorted, todayLocalISO, tsToLocalISO, maskNumber, getAccountBalance, inferInvestmentPlatform, txnFingerprint, uid, accountSort } from '@/lib/utils.js';
+import { freqSorted, todayLocalISO, tsToLocalISO, maskNumber, deriveAccountBalance, computeAccountEffects, inferInvestmentPlatform, txnFingerprint, uid, accountSort } from '@/lib/utils.js';
 import { formatINR } from '@/lib/currency.js';
 import { ArrowDownLeft, ArrowUpRight, Users, ChevronLeft, ChevronRight, Trash2, Split, Plus, X } from 'lucide-react';
 import { Link } from 'react-router-dom';
@@ -128,6 +128,9 @@ export function TransactionSheet({
   }, [categories, profiles]);
 
   const selectedAccount = accounts.find((a) => a.id === Number(form.accountId));
+
+  // Live per-account effects so the account picker can show derived balances.
+  const accountEffects = useMemo(() => computeAccountEffects(allTxns), [allTxns]);
 
   // Is the typed category an "investment" type? Two signals:
   //   (a) it exists in db.categories with type='investment', or
@@ -595,7 +598,7 @@ export function TransactionSheet({
             { value: '', label: 'Pick account…' },
             ...accountOptions.map((a) => ({
               value: a.id,
-              label: `${typeBadge(a.type)} ${a.name} ${maskNumber(a.number)} — ${formatINR(getAccountBalance(a, form.profileId || null), { hidePaise: true })}`
+              label: `${typeBadge(a.type)} ${a.name} ${maskNumber(a.number)} — ${formatINR(deriveAccountBalance(a, accountEffects.get(a.id), form.profileId || null), { hidePaise: true })}`
             }))
           ]}
         />

@@ -8,6 +8,9 @@
  *   2. Copy SmsReaderPlugin.kt into the same package folder
  *   3. Add SMS permissions to AndroidManifest.xml (idempotent)
  *   4. Add Kotlin support to app/build.gradle if missing
+ *   7. Inject a fixed release signingConfig + CI-driven versionCode/versionName
+ *      so every APK is signed with the SAME key (in-place updates work) and the
+ *      versionCode always increases (Android never blocks a "downgrade").
  */
 
 import fs from 'node:fs';
@@ -148,6 +151,69 @@ if (!appGradle.includes('androidx.biometric')) {
   );
   fs.writeFileSync(APP_GRADLE, appGradle);
   log('Added androidx.biometric dependency to app/build.gradle');
+}
+
+// 7. App-level build.gradle — fixed release signing + CI-driven version.
+//    android/ is regenerated on every CI run, so we re-inject this each time.
+//    • Signing: a single keystore (the workflow decodes the ANDROID_KEYSTORE_B64
+//      secret into app/release.keystore) is applied to the release build type,
+//      with the store/key passwords + alias read from the environment. Because
+//      every build now uses the SAME key, an APK installs in-place over the
+//      previously installed one instead of failing with a "package conflict".
+//    • Version: versionCode/versionName come from Gradle properties
+//      (-PversionCode / -PversionName, set from the CI run number) so the
+//      versionCode always goes up and Android never treats an update as a
+//      downgrade. Both fall back to sane defaults for a plain local build.
+appGradle = fs.readFileSync(APP_GRADLE, 'utf8');
+let gradleChanged = false;
+
+// 7a. Drive versionCode / versionName from Gradle properties when provided.
+if (!appGradle.includes("project.hasProperty('versionCode')")) {
+  appGradle = appGradle.replace(
+    /versionCode\s+\d+/,
+    "versionCode (project.hasProperty('versionCode') ? project.getProperty('versionCode').toInteger() : 1)"
+  );
+  appGradle = appGradle.replace(
+    /versionName\s+"[^"]*"/,
+    'versionName (project.hasProperty(\'versionName\') ? project.getProperty(\'versionName\') : "1.0")'
+  );
+  gradleChanged = true;
+}
+
+// 7b. signingConfigs.release — credentials from env; guarded so a keystore-less
+//     local build still configures (it just produces an unsigned release APK).
+if (!appGradle.includes('signingConfigs')) {
+  const signingBlock = `
+    signingConfigs {
+        release {
+            def ksFile = file("release.keystore")
+            if (ksFile.exists()) {
+                storeFile ksFile
+                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+`;
+  appGradle = appGradle.replace(/(\n\s*buildTypes\s*\{)/, `${signingBlock}$1`);
+  gradleChanged = true;
+}
+
+// 7c. Apply that signing config to the release build type.
+if (!appGradle.includes('signingConfig signingConfigs.release')) {
+  appGradle = appGradle.replace(
+    /(buildTypes\s*\{\s*release\s*\{)/,
+    `$1\n            signingConfig signingConfigs.release`
+  );
+  gradleChanged = true;
+}
+
+if (gradleChanged) {
+  fs.writeFileSync(APP_GRADLE, appGradle);
+  log('Injected release signingConfig + CI version into app/build.gradle');
+} else {
+  log('app/build.gradle signing/version already configured');
 }
 
 log('Patches applied successfully ✓');

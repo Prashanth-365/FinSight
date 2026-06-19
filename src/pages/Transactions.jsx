@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '@/db/database.js';
-import { deleteTransaction, deleteTransactions } from '@/db/txnEffects.js';
+import { deleteTransaction, deleteTransactions, updateTransactions } from '@/db/txnEffects.js';
 import { useProfile } from '@/context/ProfileContext.jsx';
 import { Card } from '@/components/ui/Card.jsx';
 import { Select } from '@/components/ui/Select.jsx';
@@ -21,20 +22,35 @@ import { fmtDate, fmtDateTime, cn, maskNumber, freqSorted, accountSort } from '@
 
 const LONG_PRESS_MS = 450;
 
+const EMPTY_FILTERS = {
+  accountId: '', from: '', to: '', categoryId: '', subCategoryId: '',
+  profileId: '', txnType: '', minAmount: '', maxAmount: '', tag: ''
+};
+
 export default function Transactions() {
   const { isMasterView, activeProfileId } = useProfile();
   const { success } = useToast();
+  const location = useLocation();
+  const navigate = useNavigate();
 
   const txns = useLiveQuery(() => db.transactions.orderBy('dateTime').reverse().toArray(), [], []);
   const accounts = useLiveQuery(() => db.accounts.toArray(), [], []);
   const categories = useLiveQuery(() => db.categories.toArray(), [], []);
   const profiles = useLiveQuery(() => db.profiles.toArray(), [], []);
 
-  const [filters, setFilters] = useState({
-    accountId: '', from: '', to: '', categoryId: '', subCategoryId: '',
-    profileId: '', txnType: '', minAmount: '', maxAmount: '', tag: ''
-  });
+  const [filters, setFilters] = useState({ ...EMPTY_FILTERS });
   const [filterOpen, setFilterOpen] = useState(false);
+
+  // Apply filters passed in via navigation (e.g. tapping a donut legend item or
+  // an account card on Home). We replace the whole filter set so the incoming
+  // intent is exactly what's shown, then clear the history state so a back/
+  // refresh doesn't silently re-apply it.
+  useEffect(() => {
+    const incoming = location.state?.filters;
+    if (!incoming) return;
+    setFilters({ ...EMPTY_FILTERS, ...incoming });
+    navigate(location.pathname, { replace: true, state: null });
+  }, [location.state, location.pathname, navigate]);
 
   const [detailTxn, setDetailTxn] = useState(null);   // row clicked → details modal
   const [editingTxn, setEditingTxn] = useState(null); // editing in TransactionSheet
@@ -165,6 +181,14 @@ export default function Transactions() {
         <SummaryPill label="Debits" value={formatINR(totals.dr, { hidePaise: true })} tone="danger" />
         <SummaryPill label="Net" value={formatINR(totals.net, { hidePaise: true })} tone={totals.net >= 0 ? 'success' : 'danger'} />
       </div>
+
+      <ActiveFilters
+        filters={filters}
+        setFilters={setFilters}
+        accounts={accounts}
+        categories={categories}
+        profiles={profiles}
+      />
 
       {selectionMode && (
         <div className="fs-card sticky top-[60px] z-30 px-3 py-2 flex items-center justify-between gap-2 animate-slide-up">
@@ -489,18 +513,17 @@ function BulkEditModal({ open, onClose, ids, topCats, allCats, accounts, profile
 
     if (Object.keys(updates).length === 0) { onClose?.(); return; }
 
-    await db.transaction('rw', db.transactions, async () => {
-      for (const id of ids) {
-        const cur = await db.transactions.get(id);
-        if (!cur) continue;
-        const next = { ...updates };
-        if (next.__tagsAdd) {
-          const set = new Set([...(cur.tags ?? []), ...next.__tagsAdd]);
-          next.tags = [...set];
-          delete next.__tagsAdd;
-        }
-        await db.transactions.update(id, next);
-      }
+    // Pull the tag-merge out of `updates`; it's applied per-row below.
+    const tagsAdd = updates.__tagsAdd;
+    delete updates.__tagsAdd;
+
+    // Route through the shared service so each row reverses its old effect and
+    // applies the new one (keeps investment amounts correct; account balances
+    // are derived and update automatically).
+    await updateTransactions(ids, (cur) => {
+      const patch = { ...updates };
+      if (tagsAdd) patch.tags = [...new Set([...(cur.tags ?? []), ...tagsAdd])];
+      return patch;
     });
     onDone?.();
   };
@@ -546,9 +569,67 @@ function BulkEditModal({ open, onClose, ids, topCats, allCats, accounts, profile
         </Field>
       </div>
       <p className="text-[11px] text-muted-fg mt-2">
-        Note: bulk editing the amount or per-row balance impact isn't supported (each row's balance was already applied at creation). Use the Edit button on individual rows for amount fixes.
+        Note: bulk editing the amount isn't supported — use the Edit button on an individual row. Account balances update automatically after profile, account or type changes.
       </p>
     </Modal>
+  );
+}
+
+/* ───────── Active-filter chips ───────── */
+
+function ActiveFilters({ filters, setFilters, accounts, categories, profiles }) {
+  const patch = (p) => setFilters({ ...filters, ...p });
+  const chips = [];
+
+  if (filters.accountId) {
+    const a = accounts.find((x) => x.id === Number(filters.accountId));
+    chips.push({ key: 'account', label: `Account: ${a?.name ?? filters.accountId}`, clear: { accountId: '' } });
+  }
+  if (filters.categoryId) {
+    const c = categories.find((x) => x.id === Number(filters.categoryId));
+    chips.push({ key: 'category', label: `Category: ${c?.name ?? filters.categoryId}`, clear: { categoryId: '', subCategoryId: '' } });
+  }
+  if (filters.subCategoryId) {
+    const c = categories.find((x) => x.id === Number(filters.subCategoryId));
+    chips.push({ key: 'subcategory', label: `Sub: ${c?.name ?? filters.subCategoryId}`, clear: { subCategoryId: '' } });
+  }
+  if (filters.profileId) {
+    const p = profiles.find((x) => x.id === Number(filters.profileId));
+    chips.push({ key: 'profile', label: `Profile: ${p?.name ?? filters.profileId}`, clear: { profileId: '' } });
+  }
+  if (filters.txnType) {
+    chips.push({ key: 'type', label: `Type: ${filters.txnType}`, clear: { txnType: '' } });
+  }
+  if (filters.from || filters.to) {
+    chips.push({ key: 'date', label: `Date: ${filters.from || '…'} → ${filters.to || '…'}`, clear: { from: '', to: '' } });
+  }
+  if (filters.minAmount || filters.maxAmount) {
+    chips.push({ key: 'amount', label: `₹ ${filters.minAmount || '0'}–${filters.maxAmount || '∞'}`, clear: { minAmount: '', maxAmount: '' } });
+  }
+  if (filters.tag) {
+    chips.push({ key: 'tag', label: `Tag: ${filters.tag}`, clear: { tag: '' } });
+  }
+
+  if (chips.length === 0) return null;
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {chips.map((ch) => (
+        <button
+          key={ch.key}
+          onClick={() => patch(ch.clear)}
+          className="fs-chip hover:bg-danger/10 hover:text-danger transition-colors"
+          title="Remove this filter"
+        >
+          {ch.label} <X className="w-3 h-3" />
+        </button>
+      ))}
+      {chips.length > 1 && (
+        <button onClick={() => setFilters({ ...EMPTY_FILTERS })} className="text-xs text-primary font-medium px-1">
+          Clear all
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -562,10 +643,7 @@ function SummaryPill({ label, value, tone }) {
 }
 
 function FilterDrawer({ open, onClose, filters, setFilters, topCats, subCats, profiles }) {
-  const clear = () => setFilters({
-    accountId: '', from: '', to: '', categoryId: '', subCategoryId: '', profileId: '',
-    txnType: '', minAmount: '', maxAmount: '', tag: ''
-  });
+  const clear = () => setFilters({ ...EMPTY_FILTERS });
   return (
     <Sheet
       open={open}
