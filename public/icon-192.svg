@@ -1,6 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
-  <rect width="192" height="192" rx="40" fill="#0b1220"/>
-  <path d="M44 134 L80 86 L104 104 L148 50" stroke="#22d3ee" stroke-width="12" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="148" cy="50" r="10" fill="#22d3ee"/>
-  <text x="96" y="172" text-anchor="middle" font-family="Inter,sans-serif" font-size="22" font-weight="700" fill="#e5e7eb">FinSight</text>
-</svg>

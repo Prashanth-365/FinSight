@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { Eye, EyeOff, Wallet, CreditCard, Landmark, PlusCircle } from 'lucide-react';
+import { Eye, EyeOff, Wallet, CreditCard, Landmark, Banknote, PlusCircle } from 'lucide-react';
 import { db, getSetting, setSetting } from '@/db/database.js';
 import { useProfile } from '@/context/ProfileContext.jsx';
 import { Card, CardBody } from '@/components/ui/Card.jsx';
@@ -11,7 +11,7 @@ import { fmtDate, maskNumber, cn, deriveAccountBalance, computeAccountEffects, a
 import { useOutletContext, Link, useNavigate } from 'react-router-dom';
 import HomeCharts from '@/components/home/HomeCharts.jsx';
 
-const ACCOUNT_ICONS = { bank: Landmark, card: CreditCard, wallet: Wallet };
+const ACCOUNT_ICONS = { bank: Landmark, card: CreditCard, wallet: Wallet, cash: Banknote };
 
 export default function Home() {
   const { openAdd } = useOutletContext() ?? {};
@@ -88,7 +88,7 @@ export default function Home() {
         </h1>
         <div className="mt-3 grid grid-cols-3 gap-2 text-sm">
           <div className="rounded-xl bg-surface/60 backdrop-blur p-3">
-            <p className="text-[11px] text-muted-fg">Bank / Wallets</p>
+            <p className="text-[11px] text-muted-fg">Bank / Cash / Wallets</p>
             <p className="font-semibold">{show ? formatINRShort(bank) : '••••'}</p>
           </div>
           <div className="rounded-xl bg-surface/60 backdrop-blur p-3">

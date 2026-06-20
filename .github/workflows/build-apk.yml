@@ -60,6 +60,13 @@ jobs:
       - name: Apply SMS plugin patches
         run: node android-patches/apply-patches.mjs
 
+      # Regenerate ic_launcher/ic_launcher_round, the adaptive foreground/background,
+      # and every mipmap-* density from assets/icon-only|foreground|background.png so
+      # the default Capacitor icon is fully replaced. android/ is recreated on every
+      # run, so this MUST happen in CI — committing the generated res/ would be moot.
+      - name: Generate launcher icons (Android)
+        run: npx @capacitor/assets generate --android
+
       - name: Sync web build into Android
         run: npx cap sync android
 

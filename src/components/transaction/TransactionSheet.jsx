@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db, reindexSlNo } from '@/db/database.js';
 import { applyTransactionEffects } from '@/db/txnEffects.js';
-import { Sheet } from '@/components/ui/Modal.jsx';
+import { Sheet, ConfirmDialog } from '@/components/ui/Modal.jsx';
 import { Field } from '@/components/ui/Input.jsx';
 import { Combobox } from '@/components/ui/Combobox.jsx';
 import { Select } from '@/components/ui/Select.jsx';
@@ -10,7 +10,7 @@ import { useProfile } from '@/context/ProfileContext.jsx';
 import { useToast } from '@/components/ui/Toast.jsx';
 import { freqSorted, todayLocalISO, tsToLocalISO, maskNumber, deriveAccountBalance, computeAccountEffects, inferInvestmentPlatform, txnFingerprint, uid, accountSort } from '@/lib/utils.js';
 import { formatINR } from '@/lib/currency.js';
-import { ArrowDownLeft, ArrowUpRight, Users, ChevronLeft, ChevronRight, Trash2, Split, Plus, X } from 'lucide-react';
+import { ArrowDownLeft, ArrowUpRight, Users, ArrowRightLeft, ChevronLeft, ChevronRight, Trash2, Split, Plus, X } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { cn } from '@/lib/utils.js';
 
@@ -26,6 +26,8 @@ const empty = (profileId) => ({
   description: '',
   tags: '',
   investmentName: '', // used only when category resolves to type='investment'
+  transferType: '',           // 'self' | 'person' — only when category is "Transfer"
+  counterpartAccountId: '',   // self transfer: the other account (stored on the row too)
   split: false,
   splits: [] // [{ key, name, amount, isMe }]
 });
@@ -63,6 +65,9 @@ export function TransactionSheet({
   const investments = useLiveQuery(() => db.investments.toArray(), [], []);
 
   const [form, setForm] = useState(empty(activeProfileId));
+  // After saving a SELF transfer, we hold the mirror details here and prompt the
+  // user to "also log this in <counterpart>?" — Yes creates the mirror row.
+  const [pendingMirror, setPendingMirror] = useState(null);
 
   useEffect(() => {
     if (!open) return;
@@ -83,7 +88,9 @@ export function TransactionSheet({
         txnType: editing.txnType ?? 'debit',
         description: editing.description ?? '',
         tags: (editing.tags ?? []).join(', '),
-        investmentName: linkedInv?.name ?? ''
+        investmentName: linkedInv?.name ?? '',
+        transferType: editing.transferType ?? '',
+        counterpartAccountId: editing.counterpartAccountId ?? ''
       });
     } else {
       // Pick a sensible default profile:
@@ -142,6 +149,23 @@ export function TransactionSheet({
     const cat = categories.find((c) => c.name.toLowerCase() === lc && c.parentId == null);
     return cat?.type === 'investment';
   }, [form.category, categories]);
+
+  // Is the typed category "Transfer"? When so we show Self | Person and (for self)
+  // turn the sub-category into an account picker.
+  const isTransferCategory = useMemo(() => {
+    if (!form.category) return false;
+    const lc = form.category.toLowerCase().trim();
+    if (lc === 'transfer') return true;
+    const cat = categories.find((c) => c.name.toLowerCase() === lc && c.parentId == null);
+    return cat?.type === 'transfer';
+  }, [form.category, categories]);
+
+  // Accounts offered as the SELF-transfer counterpart (all active accounts except
+  // the one already chosen on the transaction).
+  const counterpartOptions = useMemo(
+    () => accountSort((accounts ?? []).filter((a) => a.isActive !== 0 && a.id !== Number(form.accountId))),
+    [accounts, form.accountId]
+  );
 
   // Suggestions for the holding picker: existing investments filtered by inferred
   // platform under the active profile.
@@ -261,6 +285,44 @@ export function TransactionSheet({
     }
   };
 
+  // Create the MIRROR leg of a self transfer in the counterpart account:
+  // flipped txnType, account = counterpart, sub-category = the original account's
+  // name, same amount/profile/date/description, category "Transfer".
+  const createMirror = async (m) => {
+    if (!m) return;
+    let subId = null;
+    if (m.enteredAccountName) {
+      let s = await db.categories.where({ name: m.enteredAccountName, parentId: m.transferCatId }).first();
+      if (!s) {
+        const id = await db.categories.add({ name: m.enteredAccountName, parentId: m.transferCatId, icon: '🔁', color: '#94a3b8', type: 'transfer' });
+        s = await db.categories.get(id);
+      }
+      subId = s.id;
+    }
+    const payload = {
+      slNo: 0,
+      dateTime: m.dateTime,
+      profileId: m.profileId,
+      accountId: m.counterpartAccountId,
+      categoryId: m.transferCatId,
+      subCategoryId: subId,
+      amount: m.amount,
+      txnType: m.flippedType,
+      paymentMode: m.counterpartType,
+      description: m.description,
+      tags: [],
+      source: 'manual',
+      investmentId: null,
+      transferType: 'self',
+      counterpartAccountId: m.enteredAccountId,
+      importFingerprint: txnFingerprint({
+        accountId: m.counterpartAccountId, amount: m.amount, txnType: m.flippedType, dateTime: m.dateTime, description: m.description
+      })
+    };
+    await db.transactions.add(payload);
+    await reindexSlNo();
+  };
+
   // `mode` = 'close' (default — save and close)  or  'continue' (save & add another)
   const save = async (mode = 'close') => {
     try {
@@ -284,12 +346,28 @@ export function TransactionSheet({
         });
         cat = await db.categories.get(id);
       }
+
+      // Transfer handling. For SELF the sub-category IS the counterpart account
+      // (its name); for PERSON the sub-category is the typed name, exactly as a
+      // normal transaction. transferType is stored on the row either way.
+      let counterpartId = null;
+      let subName = form.subCategory;
+      if (isTransferCategory) {
+        if (!form.transferType) throw new Error('Choose Self or Person for this transfer.');
+        if (form.transferType === 'self') {
+          counterpartId = Number(form.counterpartAccountId);
+          if (!counterpartId) throw new Error('Pick the counterpart account in sub-category.');
+          if (counterpartId === Number(form.accountId)) throw new Error('The counterpart must be a different account.');
+          subName = accounts.find((a) => a.id === counterpartId)?.name ?? '';
+        }
+      }
+
       let sub = null;
-      if (form.subCategory) {
-        sub = await db.categories.where({ name: form.subCategory, parentId: cat.id }).first();
+      if (subName) {
+        sub = await db.categories.where({ name: subName, parentId: cat.id }).first();
         if (!sub) {
           const id = await db.categories.add({
-            name: form.subCategory, parentId: cat.id, icon: cat.icon, color: cat.color, type: cat.type
+            name: subName, parentId: cat.id, icon: cat.icon, color: cat.color, type: cat.type
           });
           sub = await db.categories.get(id);
         }
@@ -356,6 +434,8 @@ export function TransactionSheet({
         tags,
         source: smsLink ? sourceKind : 'manual',
         investmentId,
+        transferType: isTransferCategory ? form.transferType : null,
+        counterpartAccountId: (isTransferCategory && form.transferType === 'self') ? counterpartId : null,
         importFingerprint: txnFingerprint({
           accountId: Number(form.accountId),
           amount: amt,
@@ -382,6 +462,30 @@ export function TransactionSheet({
       }
 
       success(form.id ? 'Transaction updated' : 'Transaction added');
+
+      // SELF transfer → offer to mirror the entered txn in the counterpart account.
+      // Only when newly created or freshly converted (not when re-editing an
+      // existing self transfer, to avoid duplicate mirrors).
+      const promptMirror = isTransferCategory && form.transferType === 'self'
+        && (!form.id || editing?.transferType !== 'self');
+      if (promptMirror) {
+        const enteredAcc = accounts.find((a) => a.id === Number(form.accountId));
+        const cp = accounts.find((a) => a.id === counterpartId);
+        setPendingMirror({
+          transferCatId: cat.id,
+          enteredAccountId: Number(form.accountId),
+          enteredAccountName: enteredAcc?.name ?? '',
+          counterpartAccountId: counterpartId,
+          counterpartName: cp?.name ?? '',
+          counterpartType: cp?.type ?? 'bank',
+          amount: amt,
+          profileId: Number(form.profileId),
+          dateTime,
+          description: form.description ?? '',
+          flippedType: form.txnType === 'debit' ? 'credit' : 'debit'
+        });
+        return; // the confirm dialog closes the sheet after the user chooses
+      }
 
       if (mode === 'continue' && !form.id) {
         if (smsLink && onSavedAndNext) {
@@ -431,6 +535,7 @@ export function TransactionSheet({
   }
 
   return (
+    <>
     <Sheet
       open={open}
       onClose={onClose}
@@ -540,8 +645,8 @@ export function TransactionSheet({
         )}
       </Field>
 
-      {/* Split toggle — only for new transactions */}
-      {!form.id && (
+      {/* Split toggle — only for new, non-transfer transactions */}
+      {!form.id && !isTransferCategory && (
         <div className="flex items-center justify-between rounded-xl border border-border bg-elevated px-3 py-2.5 mb-3">
           <div className="flex items-center gap-2">
             <Split className="w-4 h-4 text-primary" />
@@ -604,24 +709,77 @@ export function TransactionSheet({
         />
       </Field>
 
-      <div className="grid grid-cols-2 gap-3">
-        <Field label={form.split ? 'Category (your share)' : 'Category'}>
-          <Combobox
-            value={form.category}
-            onChange={(v) => setForm({ ...form, category: v, subCategory: '' })}
-            suggestions={categorySuggestions}
-            placeholder="Food, Transport…"
-          />
-        </Field>
-        <Field label="Sub-category">
-          <Combobox
-            value={form.subCategory}
-            onChange={(v) => setForm({ ...form, subCategory: v })}
-            suggestions={subCategorySuggestions}
-            placeholder="Optional"
-          />
-        </Field>
-      </div>
+      {!isTransferCategory ? (
+        <div className="grid grid-cols-2 gap-3">
+          <Field label={form.split ? 'Category (your share)' : 'Category'}>
+            <Combobox
+              value={form.category}
+              onChange={(v) => setForm({ ...form, category: v, subCategory: '', transferType: '', counterpartAccountId: '' })}
+              suggestions={categorySuggestions}
+              placeholder="Food, Transport…"
+            />
+          </Field>
+          <Field label="Sub-category">
+            <Combobox
+              value={form.subCategory}
+              onChange={(v) => setForm({ ...form, subCategory: v })}
+              suggestions={subCategorySuggestions}
+              placeholder="Optional"
+            />
+          </Field>
+        </div>
+      ) : (
+        <>
+          <Field label="Category">
+            <Combobox
+              value={form.category}
+              onChange={(v) => setForm({ ...form, category: v, subCategory: '', transferType: '', counterpartAccountId: '' })}
+              suggestions={categorySuggestions}
+              placeholder="Food, Transport…"
+            />
+          </Field>
+          <Field label="Transfer type">
+            <div className="grid grid-cols-2 gap-2">
+              <TypeToggle
+                active={form.transferType === 'self'}
+                onClick={() => setForm({ ...form, transferType: 'self', subCategory: '' })}
+                icon={<ArrowRightLeft className="w-4 h-4" />}
+                label="Self (my accounts)"
+                tone="success"
+              />
+              <TypeToggle
+                active={form.transferType === 'person'}
+                onClick={() => setForm({ ...form, transferType: 'person', counterpartAccountId: '' })}
+                icon={<Users className="w-4 h-4" />}
+                label="Person"
+                tone="success"
+              />
+            </div>
+          </Field>
+          {form.transferType === 'self' && (
+            <Field label="Sub-category (counterpart account)" hint="The other account; on save you can mirror this entry there">
+              <Select
+                value={form.counterpartAccountId ?? ''}
+                onChange={(v) => setForm({ ...form, counterpartAccountId: v })}
+                options={[
+                  { value: '', label: 'Pick account…' },
+                  ...counterpartOptions.map((a) => ({ value: a.id, label: `${typeBadge(a.type)} ${a.name} ${maskNumber(a.number)}` }))
+                ]}
+              />
+            </Field>
+          )}
+          {form.transferType === 'person' && (
+            <Field label="Sub-category (person)">
+              <Combobox
+                value={form.subCategory}
+                onChange={(v) => setForm({ ...form, subCategory: v })}
+                suggestions={subCategorySuggestions}
+                placeholder="e.g. Ravi"
+              />
+            </Field>
+          )}
+        </>
+      )}
 
       {isInvestmentCategory && (
         <Field
@@ -657,11 +815,26 @@ export function TransactionSheet({
         />
       </Field>
     </Sheet>
+
+    <ConfirmDialog
+      open={!!pendingMirror}
+      onClose={() => { setPendingMirror(null); onClose?.(); }}
+      onConfirm={async () => {
+        try { await createMirror(pendingMirror); success('Logged in both accounts'); }
+        catch (e) { error(e.message); }
+      }}
+      title="Log the other side?"
+      message={pendingMirror
+        ? `Also log this in ${pendingMirror.counterpartName}?  ${pendingMirror.flippedType} ${formatINR(pendingMirror.amount, { hidePaise: true })}`
+        : ''}
+      confirmText="Yes, log it"
+    />
+    </>
   );
 }
 
 function typeBadge(t) {
-  return t === 'card' ? '💳' : t === 'wallet' ? '👛' : '🏦';
+  return t === 'card' ? '💳' : t === 'wallet' ? '👛' : t === 'cash' ? '💵' : '🏦';
 }
 
 function SplitPanel({ splits, profiles, nameSuggestions, activeProfileId, total, onChange }) {

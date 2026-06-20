@@ -34,6 +34,12 @@ db.version(5).stores({
   smsQueue: '++id, status, dateTime, kind, accountId'
 });
 
+// NOTE: transfers add two UNINDEXED properties to transactions —
+//   transferType ('self' | 'person' | null) and counterpartAccountId — so no
+// schema bump is needed. A self transfer's counterpart is the sub-category
+// (an account name) and (for robustness) counterpartAccountId. Charts exclude
+// the "Transfer" category as before. Cash is just accounts.type === 'cash'.
+
 // re-number slNo across all transactions in chronological order.
 // Call after any insert/update/delete of transactions whose dateTime is non-trivial.
 export async function reindexSlNo() {

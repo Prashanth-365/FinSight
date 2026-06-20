@@ -4,7 +4,7 @@ import { cn } from '@/lib/utils.js';
 
 const sections = [
   { to: 'profiles', label: 'Profiles', desc: 'Family members & avatars', icon: Users },
-  { to: 'accounts', label: 'Accounts', desc: 'Banks, cards, wallets & SMS aliases', icon: Wallet },
+  { to: 'accounts', label: 'Accounts', desc: 'Banks, cards, wallets, cash & SMS aliases', icon: Wallet },
   { to: 'categories', label: 'Categories', desc: 'Tree of expense & income tags', icon: Tag },
   { to: 'investments', label: 'Investments', desc: 'Map MF schemes, edit holdings', icon: Briefcase },
   { to: 'preferences', label: 'Preferences', desc: 'Theme, defaults, recent count', icon: Sliders },

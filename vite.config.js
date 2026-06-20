@@ -19,11 +19,15 @@ export default defineConfig({
         start_url: '/',
         scope: '/',
         icons: [
-          { src: '/icon-192.svg', sizes: '192x192', type: 'image/svg+xml', purpose: 'any maskable' },
-          { src: '/icon-512.svg', sizes: '512x512', type: 'image/svg+xml', purpose: 'any maskable' }
+          { src: '/finsight-insight-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+          { src: '/finsight-insight-maskable-1024.png', sizes: '1024x1024', type: 'image/png', purpose: 'maskable' }
         ]
       },
       workbox: {
+        // Bump cacheId to invalidate the old precache so installed PWAs pick up the
+        // new icon/manifest instead of serving the cached old one (registerType is
+        // 'autoUpdate'). Increment this string on future cache-busting changes.
+        cacheId: 'finsight-v2',
         globPatterns: ['**/*.{js,css,html,svg,png,ico}'],
         navigateFallback: '/index.html'
       }

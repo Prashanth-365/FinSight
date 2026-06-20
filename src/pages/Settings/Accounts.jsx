@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { Plus, Edit3, Trash2, Wallet, CreditCard, Landmark, X, GripVertical } from 'lucide-react';
+import { Plus, Edit3, Trash2, Wallet, CreditCard, Landmark, Banknote, X, GripVertical } from 'lucide-react';
 import {
   DndContext,
   closestCenter,
@@ -32,7 +32,8 @@ import { Avatar } from '@/components/ui/Avatar.jsx';
 const TYPES = [
   { value: 'bank', label: 'Bank', icon: Landmark },
   { value: 'card', label: 'Credit / Debit Card', icon: CreditCard },
-  { value: 'wallet', label: 'Wallet / UPI', icon: Wallet }
+  { value: 'wallet', label: 'Wallet / UPI', icon: Wallet },
+  { value: 'cash', label: 'Cash', icon: Banknote }
 ];
 
 const COLORS = ['#22d3ee', '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#a855f7', '#ec4899', '#64748b'];
@@ -265,6 +266,18 @@ function AccountEditor({ open, onClose, editing, effects, profiles, accounts = [
     try {
       if (!form.name.trim()) throw new Error('Name required');
       if (form.profileIds.length === 0) throw new Error('Pick at least one profile');
+      // Block removing a profile that still has transactions on this account —
+      // otherwise those rows would be orphaned out of the profile's view.
+      if (editing) {
+        const removed = (editing.profileIds ?? []).filter((pid) => !form.profileIds.includes(pid));
+        for (const pid of removed) {
+          const used = await db.transactions.where('accountId').equals(editing.id).filter((t) => t.profileId === pid).count();
+          if (used > 0) {
+            const pname = profiles.find((p) => p.id === pid)?.name ?? `#${pid}`;
+            throw new Error(`${pname} has ${used} transaction${used > 1 ? 's' : ''} on this account. Reassign or delete them before removing the profile.`);
+          }
+        }
+      }
       // The input holds the desired CURRENT balance per profile; store the
       // OPENING balance (current − Σ effects) so the derived current matches
       // exactly. For a new account there are no effects yet, so opening = current.
@@ -326,9 +339,11 @@ function AccountEditor({ open, onClose, editing, effects, profiles, accounts = [
           <Select value={form.type} onChange={(v) => setForm({ ...form, type: v })}
             options={TYPES.map((t) => ({ value: t.value, label: t.label }))} />
         </Field>
-        <Field label="Account / card number">
-          <input className="fs-input" value={form.number} onChange={(e) => setForm({ ...form, number: e.target.value })} placeholder="50100123457890" />
-        </Field>
+        {form.type !== 'cash' && (
+          <Field label="Account / card number">
+            <input className="fs-input" value={form.number} onChange={(e) => setForm({ ...form, number: e.target.value })} placeholder="50100123457890" />
+          </Field>
+        )}
       </div>
 
       <Field label="Color">
@@ -388,10 +403,22 @@ function AccountEditor({ open, onClose, editing, effects, profiles, accounts = [
                 </div>
               );
             })}
+            {form.profileIds.length > 1 && (
+              <div className="flex items-center justify-between border-t border-border pt-2 text-sm">
+                <span className="text-muted-fg">Total (all profiles)</span>
+                <span className="font-semibold tabular-nums">
+                  {formatINR(form.profileIds.reduce((s, pid) => {
+                    const n = Number(form.balances[String(pid)]);
+                    return s + (isFinite(n) ? n : 0);
+                  }, 0), { hidePaise: true })}
+                </span>
+              </div>
+            )}
           </div>
         </Field>
       )}
 
+      {form.type !== 'cash' && (
       <Field
         label="SMS aliases"
         hint="Mask formats like XX7890, 12XXXX90, 1234XX. Used to auto-match incoming SMS to this account."
@@ -419,6 +446,7 @@ function AccountEditor({ open, onClose, editing, effects, profiles, accounts = [
           </div>
         )}
       </Field>
+      )}
     </Modal>
   );
 }
